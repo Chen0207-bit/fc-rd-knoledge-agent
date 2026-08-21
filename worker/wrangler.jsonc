@@ -1,0 +1,21 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "fc-rd-knowledge-agent-api",
+  "main": "index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "ALLOWED_ORIGIN": "https://fc-rd-knowledge-agent.pages.dev"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fc-rd-knowledge-agent-db",
+      "database_id": "ccc9254c-b882-44d8-b1af-b31e380d1303"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  }
+}
