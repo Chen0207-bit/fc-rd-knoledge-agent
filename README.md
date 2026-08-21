@@ -35,6 +35,13 @@ npm install
 npm run dev
 ```
 
+发布前检查：
+
+```bash
+npm test
+pwsh -NoProfile -File scripts/smoke.ps1
+```
+
 Worker 本地运行：
 
 ```bash

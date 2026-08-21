@@ -71,9 +71,11 @@ export default function App() {
   const [codeInput, setCodeInput] = useState("");
   const [connected, setConnected] = useState(false);
   const [message, setMessage] = useState("");
+  const [authError, setAuthError] = useState("");
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("research intelligence agent");
   const [searchResults, setSearchResults] = useState<Paper[]>([]);
+  const [searchWarnings, setSearchWarnings] = useState<string[]>([]);
   const [papers, setPapers] = useState<Paper[]>(samplePapers);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [drafts, setDrafts] = useState<Draft[]>([]);
@@ -126,10 +128,22 @@ export default function App() {
   };
 
   async function unlock() {
-    if (!codeInput.trim()) return;
-    setAccessCode(codeInput.trim());
-    sessionStorage.setItem("demo-access-code", codeInput.trim());
-    notify("访问码已保存，正在连接 Agent");
+    const candidate = codeInput.trim();
+    if (!candidate) return;
+    setLoading(true);
+    setAuthError("");
+    try {
+      const response = await fetch(`${API_BASE}/api/stats`, { headers: { "x-demo-code": candidate } });
+      if (!response.ok) throw new Error("访问码不正确，请重新输入");
+      setAccessCode(candidate);
+      setCodeInput("");
+      sessionStorage.setItem("demo-access-code", candidate);
+      notify("访问码已验证，正在连接 Agent");
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "访问码验证失败");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function searchPapers() {
@@ -138,8 +152,9 @@ export default function App() {
     try {
       const data = await api<{ papers: Paper[]; warnings?: string[] }>(`/api/papers/search?q=${encodeURIComponent(query)}&source=all&limit=8`);
       setSearchResults(data.papers);
+      setSearchWarnings(data.warnings || []);
       setConnected(true);
-      notify(`已从双源发现 ${data.papers.length} 篇论文`);
+      notify(data.warnings?.length ? `已发现 ${data.papers.length} 篇，部分来源已降级` : `已从双源发现 ${data.papers.length} 篇论文`);
     } catch (error) {
       notify(error instanceof Error ? error.message : "检索失败");
     } finally {
@@ -285,6 +300,7 @@ export default function App() {
           <section className="workspace">
             <div className="workspace-head"><div><p className="eyebrow">DUAL-SOURCE DISCOVERY</p><h2>自动搜集论文</h2><p>同时检索 arXiv 与 Semantic Scholar；限流时自动切换 Crossref，并合并重复结果。</p></div><span className="source-pill">双源实时检索</span></div>
             <div className="search-box"><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void searchPapers()} placeholder="输入技术主题，例如：工业视觉缺陷检测 Agent" /><button className="primary" disabled={loading} onClick={() => void searchPapers()}>{loading ? "正在检索…" : "开始检索"}</button></div>
+            {searchWarnings.length ? <div className="warning-box"><strong>检索提示</strong>{searchWarnings.map((warning) => <span key={warning}>{warning}</span>)}</div> : null}
             <div className="result-list">{searchResults.length ? searchResults.map((paper) => <article className="result-card" key={`${paper.source}-${paper.externalId}`}><div className="result-source">{sourceLabel(paper.source)}</div><div><h3>{paper.title}</h3><p className="meta">{paper.authors.slice(0, 3).join(" · ")} · {formatDate(paper.publishedAt)}</p><p className="abstract">{paper.abstract || "暂无摘要"}</p><a href={paper.url} target="_blank" rel="noreferrer">查看原文 ↗</a></div><button onClick={() => void importPaper(paper)}>加入审核</button></article>) : <EmptyState title="输入主题启动双源论文采集" detail="真实结果将在这里显示，并可一键加入审核。" />}</div>
           </section>
         )}
@@ -319,7 +335,7 @@ export default function App() {
         )}
       </main>
 
-      {!accessCode || codeInput ? <div className="modal-backdrop"><div className="access-modal"><span className="seal">研</span><p className="eyebrow">SECURE DEMO</p><h2>进入研知 Agent</h2><p>请输入演示访问码。它只保存在当前浏览器会话中，用于保护 AI 调用额度。</p><input autoFocus value={codeInput} onChange={(event) => setCodeInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void unlock()} placeholder="演示访问码" type="password" /><button className="primary" onClick={() => void unlock()}>进入工作台</button>{accessCode ? <button className="text-button" onClick={() => setCodeInput("")}>取消</button> : null}</div></div> : null}
+      {!accessCode || codeInput ? <div className="modal-backdrop"><div className="access-modal"><span className="seal">研</span><p className="eyebrow">SECURE DEMO</p><h2>进入研知 Agent</h2><p>请输入演示访问码。它只保存在当前浏览器会话中，用于保护 AI 调用额度。</p><input autoFocus value={codeInput} onChange={(event) => { setCodeInput(event.target.value); setAuthError(""); }} onKeyDown={(event) => event.key === "Enter" && void unlock()} placeholder="演示访问码" type="password" />{authError ? <div className="form-error">{authError}</div> : null}<button className="primary" disabled={loading} onClick={() => void unlock()}>{loading ? "正在验证…" : "进入工作台"}</button>{accessCode ? <button className="text-button" onClick={() => setCodeInput("")}>取消</button> : null}</div></div> : null}
       {message ? <div className="toast">{message}</div> : null}
     </div>
   );

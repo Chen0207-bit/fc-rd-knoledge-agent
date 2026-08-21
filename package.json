@@ -9,6 +9,7 @@
     "dev": "vite --host 127.0.0.1",
     "k3": "node local-k3-server.mjs",
     "build": "vite build",
+    "test": "npm run build && npx tsc --noEmit",
     "preview": "vite preview --host 127.0.0.1",
     "lint": "eslint src worker --ignore-pattern dist"
   },

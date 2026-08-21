@@ -39,3 +39,15 @@ yarn-error.log*
 /outputs/
 /work/
 /worker/work/
+/.openai/
+/app/
+/db/
+/drizzle/
+/examples/
+/tests/
+/next-env.d.ts
+/next.config.ts
+/drizzle.config.ts
+/public/file.svg
+/public/globe.svg
+/public/window.svg

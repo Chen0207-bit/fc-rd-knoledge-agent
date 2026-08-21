@@ -307,8 +307,7 @@ const worker = {
 
 研发资料：
 ${sourceText}`;
-        if (!env.GLM_API_KEY) return error(request, env, "GLM API 尚未配置", 503);
-        const glmResponse = await fetch(GLM_API_URL, {
+        const glmResponse = env.GLM_API_KEY ? await fetch(GLM_API_URL, {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${env.GLM_API_KEY}` },
           body: JSON.stringify({
@@ -321,10 +320,10 @@ ${sourceText}`;
             max_tokens: 4200,
             temperature: 0.25,
           }),
-        });
-        const result = await glmResponse.json() as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } };
+        }) : null;
+        const result = glmResponse ? await glmResponse.json() as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } } : {};
         let usedModel = AI_MODEL;
-        let markdown = glmResponse.ok ? result.choices?.[0]?.message?.content || "" : "";
+        let markdown = glmResponse?.ok ? result.choices?.[0]?.message?.content || "" : "";
         if (!markdown.trim()) {
           const fallback = await env.AI.run(FALLBACK_AI_MODEL, {
             messages: [
