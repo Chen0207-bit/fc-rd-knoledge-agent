@@ -305,7 +305,7 @@ export default function App() {
 
         {view === "ip" && (
           <section className="workspace">
-            <div className="workspace-head"><div><p className="eyebrow">IP DRAFTING AGENT</p><h2>知识产权材料生成</h2><p>基于选定研发资料，生成技术交底书、摘要和权利要求初稿。</p></div><span className="source-pill">{IS_LOCAL_DEMO ? (k3Ready ? "本地 K3 · 已连接" : "本地 K3 · 未连接") : "智谱 GLM-5.3"}</span></div>
+            <div className="workspace-head"><div><p className="eyebrow">IP DRAFTING AGENT</p><h2>知识产权材料生成</h2><p>基于选定研发资料，生成技术交底书、摘要和权利要求初稿。</p></div><span className="source-pill">{IS_LOCAL_DEMO ? (k3Ready ? "本地 K3 · 已连接" : "本地 K3 · 未连接") : "GLM-5.3 · 自动容错"}</span></div>
             <div className="ip-layout">
               <div className="source-selector"><label>材料名称<input value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} /></label><h3>选择依据材料</h3>
                 {[...approvedPapers.map((paper) => ({ ref: `paper:${paper.id}`, name: paper.title, type: "论文" })), ...documents.map((doc) => ({ ref: `document:${doc.id}`, name: doc.name, type: "研发文件" }))].map((item) => <label className="source-option" key={item.ref}><input type="checkbox" checked={selectedSources.includes(item.ref)} onChange={() => toggleSource(item.ref)} /><span><b>{item.type}</b><strong>{item.name}</strong></span></label>)}

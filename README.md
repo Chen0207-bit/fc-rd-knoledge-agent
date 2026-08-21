@@ -23,7 +23,7 @@ React/Vite (Pages)
             │
 Cloudflare Worker API
   ├─ D1：论文、文档、申报草稿、限流记录
-  └─ 智谱官方 API：GLM-5.3 生成中文申报材料
+  └─ 智谱官方 API：优先使用 GLM-5.3；账户不可用时由 Workers AI 容错
 ```
 
 ## 本地运行

@@ -5,8 +5,10 @@ type D1Statement = {
   run: () => Promise<{ success: boolean; meta?: { last_row_id?: number } }>;
 };
 type D1Database = { prepare: (sql: string) => D1Statement };
+type AiBinding = { run: (model: string, input: Record<string, unknown>) => Promise<Record<string, unknown>> };
 interface Env {
   DB: D1Database;
+  AI: AiBinding;
   DEMO_ACCESS_CODE: string;
   GLM_API_KEY: string;
   ALLOWED_ORIGIN: string;
@@ -27,6 +29,7 @@ type Paper = {
 };
 
 const AI_MODEL = "glm-5.3";
+const FALLBACK_AI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8";
 const GLM_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 
 function responseHeaders(request: Request, env: Env) {
@@ -320,12 +323,24 @@ ${sourceText}`;
           }),
         });
         const result = await glmResponse.json() as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } };
-        if (!glmResponse.ok) throw new Error(result.error?.message || `GLM 返回 ${glmResponse.status}`);
-        const markdown = result.choices?.[0]?.message?.content || "";
+        let usedModel = AI_MODEL;
+        let markdown = glmResponse.ok ? result.choices?.[0]?.message?.content || "" : "";
+        if (!markdown.trim()) {
+          const fallback = await env.AI.run(FALLBACK_AI_MODEL, {
+            messages: [
+              { role: "system", content: "你负责把研发证据转化为结构严谨、边界清楚的知识产权材料初稿。" },
+              { role: "user", content: prompt },
+            ],
+            max_tokens: 4200,
+            temperature: 0.25,
+          });
+          markdown = typeof fallback.response === "string" ? fallback.response : typeof fallback.result === "string" ? fallback.result : "";
+          usedModel = FALLBACK_AI_MODEL;
+        }
         if (!markdown.trim()) throw new Error("GLM 未返回正文内容");
         const sourceRefs = JSON.stringify(body.sources || []);
-        const insert = await env.DB.prepare("INSERT INTO ip_drafts (title, source_refs, markdown, model) VALUES (?, ?, ?, ?)").bind(title, sourceRefs, markdown, AI_MODEL).run();
-        const draft = { id: Number(insert.meta?.last_row_id || 0), title, sourceRefs, markdown, model: AI_MODEL, createdAt: new Date().toISOString() };
+        const insert = await env.DB.prepare("INSERT INTO ip_drafts (title, source_refs, markdown, model) VALUES (?, ?, ?, ?)").bind(title, sourceRefs, markdown, usedModel).run();
+        const draft = { id: Number(insert.meta?.last_row_id || 0), title, sourceRefs, markdown, model: usedModel, createdAt: new Date().toISOString() };
         return json(request, env, { draft }, 201);
       }
 
