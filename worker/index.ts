@@ -313,6 +313,13 @@ ${sourceText}`;
         return json(request, env, { draft }, 201);
       }
 
+      if (request.method === "POST" && url.pathname === "/api/source-context") {
+        const body = await request.json() as { sources?: string[] };
+        const sourceText = await collectSources(env, body.sources || []);
+        if (sourceText.length < 80) return error(request, env, "没有找到可用于生成的已入库资料");
+        return json(request, env, { sourceText });
+      }
+
       if (request.method === "GET" && url.pathname === "/api/ip-drafts") {
         const rows = await env.DB.prepare("SELECT id, title, source_refs, markdown, model, created_at FROM ip_drafts ORDER BY created_at DESC LIMIT 20").all<Record<string, unknown>>();
         return json(request, env, { drafts: rows.results.map((row) => ({ id: Number(row.id), title: String(row.title), sourceRefs: String(row.source_refs), markdown: String(row.markdown), model: String(row.model), createdAt: String(row.created_at) })) });

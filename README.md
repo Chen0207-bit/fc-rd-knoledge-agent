@@ -41,6 +41,16 @@ Worker 本地运行：
 npx wrangler dev -c worker/wrangler.jsonc
 ```
 
+### 使用本机 settings.json 的 K3
+
+本地页面会优先使用只监听 `127.0.0.1` 的 K3 桥接服务。它运行时读取 `~/.claude/settings.json`，密钥不会复制到项目、浏览器或 Cloudflare：
+
+```bash
+npm run k3
+```
+
+保持该命令运行，再打开 `npm run dev` 启动的本地页面。知识产权页面显示“本地 K3 · 已连接”后，生成操作即使用模型 `k3`。公网 Demo 继续使用 Workers AI，因为 `settings.json` 中的内网地址无法由 Cloudflare 访问。
+
 如需切换 API 地址，设置 `VITE_API_BASE_URL`。部署前需在 `worker/wrangler.jsonc` 中替换 D1 数据库 ID，并设置演示口令：
 
 ```bash

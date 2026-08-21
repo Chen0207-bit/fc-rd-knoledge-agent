@@ -28,6 +28,8 @@ const API_BASE = (
   import.meta.env.VITE_API_BASE_URL ||
   "https://fc-rd-knowledge-agent-api.feng85656.workers.dev"
 ).replace(/\/$/, "");
+const K3_LOCAL_BASE = (import.meta.env.VITE_K3_LOCAL_URL || "http://127.0.0.1:8765").replace(/\/$/, "");
+const IS_LOCAL_DEMO = ["127.0.0.1", "localhost"].includes(window.location.hostname);
 const samplePapers: Paper[] = [
   { id: -1, source: "arxiv", externalId: "demo-1", title: "面向复杂工程文档的多智能体检索与证据校验", authors: ["Lin Chen", "Ming Zhou"], abstract: "提出一种面向工程知识文档的多智能体检索、交叉验证与证据追溯方法。", publishedAt: "2026-07-18", url: "https://arxiv.org", status: "pending" },
   { id: -2, source: "semantic_scholar", externalId: "demo-2", title: "Knowledge Graph Grounded Research Intelligence", authors: ["A. Kumar"], abstract: "A knowledge-graph grounded pipeline for research intelligence.", publishedAt: "2026-05-09", url: "https://semanticscholar.org", status: "approved" },
@@ -79,6 +81,7 @@ export default function App() {
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [draftTitle, setDraftTitle] = useState("智能研发知识处理方法及系统");
   const [activeDraft, setActiveDraft] = useState<Draft | null>(null);
+  const [k3Ready, setK3Ready] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const api = useCallback(async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
@@ -111,6 +114,11 @@ export default function App() {
   }, [accessCode, api]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  useEffect(() => {
+    if (!IS_LOCAL_DEMO) return;
+    fetch(`${K3_LOCAL_BASE}/health`).then((response) => response.json()).then((data) => setK3Ready(Boolean(data.ok && data.model === "k3"))).catch(() => setK3Ready(false));
+  }, []);
 
   const notify = (text: string) => {
     setMessage(text);
@@ -186,6 +194,22 @@ export default function App() {
     setLoading(true);
     setActiveDraft(null);
     try {
+      if (IS_LOCAL_DEMO) {
+        if (!k3Ready) throw new Error("K3 本地服务未启动，请先运行 npm run k3");
+        const context = await api<{ sourceText: string }>("/api/source-context", { method: "POST", body: JSON.stringify({ sources: selectedSources }) });
+        const response = await fetch(`${K3_LOCAL_BASE}/generate`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: draftTitle, sourceText: context.sourceText }),
+        });
+        const localData = await response.json();
+        if (!response.ok) throw new Error(localData.error || `K3 请求失败（${response.status}）`);
+        const localDraft = localData.draft as Draft;
+        setActiveDraft(localDraft);
+        setDrafts((current) => [localDraft, ...current]);
+        notify("K3 已生成知识产权材料初稿");
+        return;
+      }
       const data = await api<{ draft: Draft }>("/api/ip-drafts", { method: "POST", body: JSON.stringify({ title: draftTitle, sources: selectedSources }) });
       setActiveDraft(data.draft);
       notify("知识产权材料初稿已生成");
@@ -281,7 +305,7 @@ export default function App() {
 
         {view === "ip" && (
           <section className="workspace">
-            <div className="workspace-head"><div><p className="eyebrow">IP DRAFTING AGENT</p><h2>知识产权材料生成</h2><p>基于选定研发资料，生成技术交底书、摘要和权利要求初稿。</p></div><span className="source-pill">Workers AI · Qwen</span></div>
+            <div className="workspace-head"><div><p className="eyebrow">IP DRAFTING AGENT</p><h2>知识产权材料生成</h2><p>基于选定研发资料，生成技术交底书、摘要和权利要求初稿。</p></div><span className="source-pill">{IS_LOCAL_DEMO ? (k3Ready ? "本地 K3 · 已连接" : "本地 K3 · 未连接") : "Workers AI · Qwen"}</span></div>
             <div className="ip-layout">
               <div className="source-selector"><label>材料名称<input value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} /></label><h3>选择依据材料</h3>
                 {[...approvedPapers.map((paper) => ({ ref: `paper:${paper.id}`, name: paper.title, type: "论文" })), ...documents.map((doc) => ({ ref: `document:${doc.id}`, name: doc.name, type: "研发文件" }))].map((item) => <label className="source-option" key={item.ref}><input type="checkbox" checked={selectedSources.includes(item.ref)} onChange={() => toggleSource(item.ref)} /><span><b>{item.type}</b><strong>{item.name}</strong></span></label>)}
