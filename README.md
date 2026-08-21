@@ -11,7 +11,7 @@
 1. **论文情报**：同时查询 arXiv 与 Semantic Scholar，合并并去重结果；Semantic Scholar 限流时自动切换 Crossref。
 2. **审核入库**：候选论文先进入待审区，经人工批准后成为研发知识库资料。
 3. **研发资料导入**：浏览器本地解析 PDF/DOCX，仅把提取后的文字发送给 API，原文件不上传。
-4. **知识产权材料**：基于已导入资料，通过 Cloudflare Workers AI 生成技术交底书、专利摘要和权利要求初稿。
+4. **知识产权材料**：基于已导入资料，通过智谱官方 GLM API 生成技术交底书、专利摘要和权利要求初稿。
 
 ## 架构
 
@@ -23,7 +23,7 @@ React/Vite (Pages)
             │
 Cloudflare Worker API
   ├─ D1：论文、文档、申报草稿、限流记录
-  └─ Workers AI：Qwen 生成中文申报材料
+  └─ 智谱官方 API：GLM-5.3 生成中文申报材料
 ```
 
 ## 本地运行
@@ -49,12 +49,13 @@ npx wrangler dev -c worker/wrangler.jsonc
 npm run k3
 ```
 
-保持该命令运行，再打开 `npm run dev` 启动的本地页面。知识产权页面显示“本地 K3 · 已连接”后，生成操作即使用模型 `k3`。公网 Demo 继续使用 Workers AI，因为 `settings.json` 中的内网地址无法由 Cloudflare 访问。
+保持该命令运行，再打开 `npm run dev` 启动的本地页面。知识产权页面显示“本地 K3 · 已连接”后，生成操作即使用模型 `k3`。公网 Demo 使用配置在 Cloudflare Secret 中的智谱官方 GLM API。
 
 如需切换 API 地址，设置 `VITE_API_BASE_URL`。部署前需在 `worker/wrangler.jsonc` 中替换 D1 数据库 ID，并设置演示口令：
 
 ```bash
 npx wrangler secret put DEMO_ACCESS_CODE -c worker/wrangler.jsonc
+npx wrangler secret put GLM_API_KEY -c worker/wrangler.jsonc
 ```
 
 ## 部署

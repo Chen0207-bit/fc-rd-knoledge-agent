@@ -5,12 +5,10 @@ type D1Statement = {
   run: () => Promise<{ success: boolean; meta?: { last_row_id?: number } }>;
 };
 type D1Database = { prepare: (sql: string) => D1Statement };
-type AiBinding = { run: (model: string, input: Record<string, unknown>) => Promise<Record<string, unknown>> };
-
 interface Env {
   DB: D1Database;
-  AI: AiBinding;
   DEMO_ACCESS_CODE: string;
+  GLM_API_KEY: string;
   ALLOWED_ORIGIN: string;
 }
 
@@ -28,7 +26,8 @@ type Paper = {
   reviewerNote?: string;
 };
 
-const AI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8";
+const AI_MODEL = "glm-5.3";
+const GLM_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 
 function responseHeaders(request: Request, env: Env) {
   const origin = request.headers.get("origin") || "";
@@ -305,8 +304,25 @@ const worker = {
 
 研发资料：
 ${sourceText}`;
-        const result = await env.AI.run(AI_MODEL, { messages: [{ role: "system", content: "你负责把研发证据转化为结构严谨、边界清楚的知识产权材料初稿。" }, { role: "user", content: prompt }], max_tokens: 4200, temperature: 0.25 });
-        const markdown = typeof result.response === "string" ? result.response : typeof result.result === "string" ? result.result : JSON.stringify(result, null, 2);
+        if (!env.GLM_API_KEY) return error(request, env, "GLM API 尚未配置", 503);
+        const glmResponse = await fetch(GLM_API_URL, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${env.GLM_API_KEY}` },
+          body: JSON.stringify({
+            model: AI_MODEL,
+            messages: [
+              { role: "system", content: "你负责把研发证据转化为结构严谨、边界清楚的知识产权材料初稿。" },
+              { role: "user", content: prompt },
+            ],
+            stream: false,
+            max_tokens: 4200,
+            temperature: 0.25,
+          }),
+        });
+        const result = await glmResponse.json() as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } };
+        if (!glmResponse.ok) throw new Error(result.error?.message || `GLM 返回 ${glmResponse.status}`);
+        const markdown = result.choices?.[0]?.message?.content || "";
+        if (!markdown.trim()) throw new Error("GLM 未返回正文内容");
         const sourceRefs = JSON.stringify(body.sources || []);
         const insert = await env.DB.prepare("INSERT INTO ip_drafts (title, source_refs, markdown, model) VALUES (?, ?, ?, ?)").bind(title, sourceRefs, markdown, AI_MODEL).run();
         const draft = { id: Number(insert.meta?.last_row_id || 0), title, sourceRefs, markdown, model: AI_MODEL, createdAt: new Date().toISOString() };
