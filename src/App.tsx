@@ -92,7 +92,11 @@ export default function App() {
       headers: { "content-type": "application/json", ...(accessCode ? { "x-demo-code": accessCode } : {}), ...(options.headers || {}) },
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || `请求失败（${response.status}）`);
+    if (!response.ok) {
+      const error = new Error(payload.error || `请求失败（${response.status}）`) as Error & { status?: number };
+      error.status = response.status;
+      throw error;
+    }
     return payload as T;
   }, [accessCode]);
 
@@ -110,8 +114,14 @@ export default function App() {
       setDrafts(draftData.drafts);
       setStats(statData);
       setConnected(true);
-    } catch {
+    } catch (error) {
       setConnected(false);
+      if (error instanceof Error && (error as Error & { status?: number }).status === 401) {
+        sessionStorage.removeItem("demo-access-code");
+        setAccessCode("");
+        setCodeInput("");
+        setAuthError("访问码已失效，请重新输入");
+      }
     }
   }, [accessCode, api]);
 
