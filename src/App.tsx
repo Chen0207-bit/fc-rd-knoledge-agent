@@ -9,7 +9,7 @@ type View = "dashboard" | "discover" | "review" | "library" | "ip";
 type PaperStatus = "pending" | "approved" | "rejected";
 type Paper = {
   id?: number;
-  source: "arxiv" | "semantic_scholar";
+  source: "arxiv" | "semantic_scholar" | "crossref";
   externalId: string;
   title: string;
   authors: string[];
@@ -39,7 +39,7 @@ function formatDate(value?: string) {
 }
 
 function sourceLabel(source: Paper["source"]) {
-  return source === "arxiv" ? "arXiv" : "S2";
+  return source === "arxiv" ? "arXiv" : source === "crossref" ? "Crossref" : "S2";
 }
 
 async function extractFile(file: File) {
@@ -259,7 +259,7 @@ export default function App() {
 
         {view === "discover" && (
           <section className="workspace">
-            <div className="workspace-head"><div><p className="eyebrow">DUAL-SOURCE DISCOVERY</p><h2>自动搜集论文</h2><p>同时检索 arXiv 与 Semantic Scholar，自动合并重复结果。</p></div><span className="source-pill">双源实时检索</span></div>
+            <div className="workspace-head"><div><p className="eyebrow">DUAL-SOURCE DISCOVERY</p><h2>自动搜集论文</h2><p>同时检索 arXiv 与 Semantic Scholar；限流时自动切换 Crossref，并合并重复结果。</p></div><span className="source-pill">双源实时检索</span></div>
             <div className="search-box"><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void searchPapers()} placeholder="输入技术主题，例如：工业视觉缺陷检测 Agent" /><button className="primary" disabled={loading} onClick={() => void searchPapers()}>{loading ? "正在检索…" : "开始检索"}</button></div>
             <div className="result-list">{searchResults.length ? searchResults.map((paper) => <article className="result-card" key={`${paper.source}-${paper.externalId}`}><div className="result-source">{sourceLabel(paper.source)}</div><div><h3>{paper.title}</h3><p className="meta">{paper.authors.slice(0, 3).join(" · ")} · {formatDate(paper.publishedAt)}</p><p className="abstract">{paper.abstract || "暂无摘要"}</p><a href={paper.url} target="_blank" rel="noreferrer">查看原文 ↗</a></div><button onClick={() => void importPaper(paper)}>加入审核</button></article>) : <EmptyState title="输入主题启动双源论文采集" detail="真实结果将在这里显示，并可一键加入审核。" />}</div>
           </section>

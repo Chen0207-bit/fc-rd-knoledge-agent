@@ -16,7 +16,7 @@ interface Env {
 
 type Paper = {
   id?: number;
-  source: "arxiv" | "semantic_scholar";
+  source: "arxiv" | "semantic_scholar" | "crossref";
   externalId: string;
   title: string;
   authors: string[];
@@ -120,6 +120,39 @@ async function searchSemanticScholar(query: string, limit: number): Promise<Pape
   });
 }
 
+async function searchCrossref(query: string, limit: number): Promise<Paper[]> {
+  const url = new URL("https://api.crossref.org/works");
+  url.searchParams.set("query", query);
+  url.searchParams.set("rows", String(limit));
+  url.searchParams.set("select", "DOI,title,abstract,author,published-online,published-print,URL,link");
+  const response = await fetch(url, { headers: { "user-agent": "fc-rd-knowledge-agent/1.0 (mailto:feng85656@gmail.com)" } });
+  if (!response.ok) throw new Error(`Crossref 返回 ${response.status}`);
+  const payload = await response.json() as { message?: { items?: Array<Record<string, unknown>> } };
+  return (payload.message?.items || []).map((item) => {
+    const authors = Array.isArray(item.author)
+      ? item.author.map((author) => {
+          const value = author as { given?: string; family?: string };
+          return `${value.given || ""} ${value.family || ""}`.trim();
+        }).filter(Boolean)
+      : [];
+    const dateParts = ((item["published-online"] || item["published-print"]) as { "date-parts"?: number[][] } | undefined)?.["date-parts"]?.[0] || [];
+    const publishedAt = dateParts.length ? `${dateParts[0]}-${String(dateParts[1] || 1).padStart(2, "0")}-${String(dateParts[2] || 1).padStart(2, "0")}` : "";
+    const links = Array.isArray(item.link) ? item.link as Array<{ URL?: string; "content-type"?: string }> : [];
+    const pdfUrl = links.find((link) => link["content-type"] === "application/pdf")?.URL;
+    const title = Array.isArray(item.title) ? String(item.title[0] || "未命名论文") : String(item.title || "未命名论文");
+    return {
+      source: "crossref" as const,
+      externalId: String(item.DOI || crypto.randomUUID()),
+      title: clean(title),
+      authors,
+      abstract: clean(String(item.abstract || "")),
+      publishedAt,
+      url: String(item.URL || (item.DOI ? `https://doi.org/${item.DOI}` : "https://search.crossref.org")),
+      pdfUrl,
+    };
+  });
+}
+
 function deduplicate(papers: Paper[]) {
   const seen = new Set<string>();
   return papers.filter((paper) => {
@@ -190,7 +223,18 @@ const worker = {
         if (source === "all" || source === "semantic_scholar") tasks.push(searchSemanticScholar(query, limit));
         const settled = await Promise.allSettled(tasks);
         const warnings = settled.filter((item) => item.status === "rejected").map((item) => (item as PromiseRejectedResult).reason?.message || "论文源暂时不可用");
-        const papers = deduplicate(settled.flatMap((item) => item.status === "fulfilled" ? item.value : [])).slice(0, limit * 2);
+        const collected = settled.flatMap((item) => item.status === "fulfilled" ? item.value : []);
+        const semanticRequested = source === "all" || source === "semantic_scholar";
+        const semanticAvailable = collected.some((paper) => paper.source === "semantic_scholar");
+        if (semanticRequested && !semanticAvailable) {
+          try {
+            collected.push(...await searchCrossref(query, limit));
+            warnings.push("Semantic Scholar 当前限流，已自动切换 Crossref");
+          } catch (fallbackError) {
+            warnings.push(fallbackError instanceof Error ? fallbackError.message : "Crossref 备用源暂时不可用");
+          }
+        }
+        const papers = deduplicate(collected).slice(0, limit * 2);
         return json(request, env, { papers, warnings });
       }
 

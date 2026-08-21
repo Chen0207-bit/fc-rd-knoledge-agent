@@ -8,7 +8,7 @@
 
 ## 演示场景
 
-1. **论文情报**：同时查询 arXiv 与 Semantic Scholar，合并并去重结果。
+1. **论文情报**：同时查询 arXiv 与 Semantic Scholar，合并并去重结果；Semantic Scholar 限流时自动切换 Crossref。
 2. **审核入库**：候选论文先进入待审区，经人工批准后成为研发知识库资料。
 3. **研发资料导入**：浏览器本地解析 PDF/DOCX，仅把提取后的文字发送给 API，原文件不上传。
 4. **知识产权材料**：基于已导入资料，通过 Cloudflare Workers AI 生成技术交底书、专利摘要和权利要求初稿。
