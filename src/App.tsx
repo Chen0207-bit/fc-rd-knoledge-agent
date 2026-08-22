@@ -241,7 +241,7 @@ function readSkills() {
       const migrated = DEFAULT_SKILLS.map((skill) => {
         const old = savedById.get(skill.id);
         const looksUserEdited = old?.source === "uploaded" || (old?.content?.length || 0) > 500;
-        return looksUserEdited ? old : { ...skill, enabled: old?.enabled ?? skill.enabled };
+        return looksUserEdited && old ? old : { ...skill, enabled: old?.enabled ?? skill.enabled };
       });
       const defaultsIds = new Set(DEFAULT_SKILLS.map((skill) => skill.id));
       const custom = saved.filter((skill) => !defaultsIds.has(skill.id));
