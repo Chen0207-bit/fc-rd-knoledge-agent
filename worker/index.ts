@@ -14,6 +14,8 @@ interface Env {
   ALLOWED_ORIGIN: string;
 }
 
+let featureColumnsReady: Promise<void> | null = null;
+
 type Paper = {
   id?: number;
   source: "arxiv" | "semantic_scholar" | "crossref";
@@ -26,6 +28,8 @@ type Paper = {
   pdfUrl?: string;
   status?: "pending" | "approved" | "rejected";
   reviewerNote?: string;
+  libraryState?: "in" | "removed";
+  groupName?: string;
 };
 
 const AI_MODEL = "glm-5.3";
@@ -50,6 +54,21 @@ function json(request: Request, env: Env, body: unknown, status = 200) {
 
 function error(request: Request, env: Env, message: string, status = 400) {
   return json(request, env, { error: message }, status);
+}
+
+async function ensureFeatureColumns(env: Env) {
+  if (featureColumnsReady) return featureColumnsReady;
+  featureColumnsReady = (async () => {
+  for (const statement of [
+    "ALTER TABLE papers ADD COLUMN library_state TEXT NOT NULL DEFAULT 'in'",
+    "ALTER TABLE papers ADD COLUMN group_name TEXT NOT NULL DEFAULT '未分类'",
+    "ALTER TABLE documents ADD COLUMN group_name TEXT NOT NULL DEFAULT '未分类'",
+    "ALTER TABLE ip_drafts ADD COLUMN group_name TEXT NOT NULL DEFAULT '未分类'",
+  ]) {
+    try { await env.DB.prepare(statement).run(); } catch { /* existing column */ }
+  }
+  })();
+  return featureColumnsReady;
 }
 
 function clean(value = "") {
@@ -178,6 +197,8 @@ function rowToPaper(row: Record<string, unknown>): Paper {
     pdfUrl: String(row.pdf_url || ""),
     status: row.status as Paper["status"],
     reviewerNote: String(row.reviewer_note || ""),
+    libraryState: (row.library_state || "in") as Paper["libraryState"],
+    groupName: String(row.group_name || "未分类"),
   };
 }
 
@@ -197,7 +218,7 @@ async function collectSources(env: Env, refs: string[]) {
     const [type, rawId] = ref.split(":");
     const id = Number(rawId);
     if (type === "paper") {
-      const row = await env.DB.prepare("SELECT title, abstract FROM papers WHERE id = ? AND status = 'approved'").bind(id).first<{ title: string; abstract: string }>();
+      const row = await env.DB.prepare("SELECT title, abstract FROM papers WHERE id = ? AND status = 'approved' AND library_state = 'in'").bind(id).first<{ title: string; abstract: string }>();
       if (row) sections.push(`【论文：${row.title}】\n${row.abstract}`);
     } else if (type === "document") {
       const row = await env.DB.prepare("SELECT name, text FROM documents WHERE id = ?").bind(id).first<{ name: string; text: string }>();
@@ -215,6 +236,7 @@ const worker = {
     if (!env.DEMO_ACCESS_CODE || request.headers.get("x-demo-code") !== env.DEMO_ACCESS_CODE) return error(request, env, "演示访问码不正确", 401);
 
     try {
+      await ensureFeatureColumns(env);
       if (request.method === "GET" && url.pathname === "/api/papers/search") {
         const query = (url.searchParams.get("q") || "").trim();
         if (query.length < 2) return error(request, env, "请输入至少两个字符的检索主题");
@@ -243,10 +265,10 @@ const worker = {
       if (request.method === "POST" && url.pathname === "/api/papers/import") {
         const paper = await request.json() as Paper;
         if (!paper.title || !paper.externalId || !paper.source) return error(request, env, "论文数据不完整");
-        await env.DB.prepare(`INSERT INTO papers (source, external_id, title, authors, abstract, published_at, url, pdf_url, status)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        await env.DB.prepare(`INSERT INTO papers (source, external_id, title, authors, abstract, published_at, url, pdf_url, status, library_state, group_name)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'in', ?)
           ON CONFLICT(source, external_id) DO UPDATE SET title=excluded.title, authors=excluded.authors, abstract=excluded.abstract, published_at=excluded.published_at, url=excluded.url, pdf_url=excluded.pdf_url`)
-          .bind(paper.source, paper.externalId, paper.title.slice(0, 600), JSON.stringify(paper.authors || []), (paper.abstract || "").slice(0, 30_000), paper.publishedAt || "", paper.url || "", paper.pdfUrl || "").run();
+          .bind(paper.source, paper.externalId, paper.title.slice(0, 600), JSON.stringify(paper.authors || []), (paper.abstract || "").slice(0, 30_000), paper.publishedAt || "", paper.url || "", paper.pdfUrl || "", String(paper.groupName || "未分类").slice(0, 80)).run();
         return json(request, env, { ok: true }, 201);
       }
 
@@ -261,27 +283,59 @@ const worker = {
       if (request.method === "POST" && reviewMatch) {
         const body = await request.json() as { status?: string; note?: string };
         if (!["approved", "rejected"].includes(body.status || "")) return error(request, env, "审核状态无效");
-        await env.DB.prepare("UPDATE papers SET status = ?, reviewer_note = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(body.status, (body.note || "").slice(0, 1000), Number(reviewMatch[1])).run();
+        await env.DB.prepare("UPDATE papers SET status = ?, library_state = ?, reviewer_note = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(body.status, body.status === "approved" ? "in" : "removed", (body.note || "").slice(0, 1000), Number(reviewMatch[1])).run();
+        return json(request, env, { ok: true });
+      }
+
+      const libraryMatch = url.pathname.match(/^\/api\/papers\/(\d+)\/library$/);
+      if (request.method === "POST" && libraryMatch) {
+        const body = await request.json() as { action?: string };
+        if (!["remove", "restore"].includes(body.action || "")) return error(request, env, "出库操作无效");
+        await env.DB.prepare("UPDATE papers SET library_state = ? WHERE id = ?").bind(body.action === "remove" ? "removed" : "in", Number(libraryMatch[1])).run();
+        return json(request, env, { ok: true });
+      }
+
+      const paperGroupMatch = url.pathname.match(/^\/api\/papers\/(\d+)\/group$/);
+      if (request.method === "POST" && paperGroupMatch) {
+        const body = await request.json() as { groupName?: string };
+        await env.DB.prepare("UPDATE papers SET group_name = ? WHERE id = ?").bind(String(body.groupName || "未分类").slice(0, 80), Number(paperGroupMatch[1])).run();
         return json(request, env, { ok: true });
       }
 
       if (request.method === "POST" && url.pathname === "/api/documents") {
-        const body = await request.json() as { name?: string; mimeType?: string; size?: number; text?: string };
+        const body = await request.json() as { name?: string; mimeType?: string; size?: number; text?: string; groupName?: string };
         if (!body.name || !body.text || body.text.trim().length < 80) return error(request, env, "研发文件文本不足");
         if ((body.size || 0) > 15 * 1024 * 1024) return error(request, env, "文件超过 15 MB");
-        await env.DB.prepare("INSERT INTO documents (name, mime_type, size, text) VALUES (?, ?, ?, ?)").bind(body.name.slice(0, 500), body.mimeType || "", body.size || 0, body.text.slice(0, 120_000)).run();
+        await env.DB.prepare("INSERT INTO documents (name, mime_type, size, text, group_name) VALUES (?, ?, ?, ?, ?)").bind(body.name.slice(0, 500), body.mimeType || "", body.size || 0, body.text.slice(0, 120_000), String(body.groupName || "未分类").slice(0, 80)).run();
         return json(request, env, { ok: true }, 201);
       }
 
       if (request.method === "GET" && url.pathname === "/api/documents") {
-        const rows = await env.DB.prepare("SELECT id, name, mime_type, size, substr(text, 1, 260) AS text_preview, created_at FROM documents ORDER BY created_at DESC LIMIT 50").all<Record<string, unknown>>();
-        return json(request, env, { documents: rows.results.map((row) => ({ id: Number(row.id), name: String(row.name), mimeType: String(row.mime_type), size: Number(row.size), textPreview: String(row.text_preview || ""), createdAt: String(row.created_at) })) });
+        const rows = await env.DB.prepare("SELECT id, name, mime_type, size, substr(text, 1, 260) AS text_preview, created_at, group_name FROM documents ORDER BY created_at DESC LIMIT 50").all<Record<string, unknown>>();
+        return json(request, env, { documents: rows.results.map((row) => ({ id: Number(row.id), name: String(row.name), mimeType: String(row.mime_type), size: Number(row.size), textPreview: String(row.text_preview || ""), createdAt: String(row.created_at), groupName: String(row.group_name || "未分类") })) });
+      }
+
+      const documentMatch = url.pathname.match(/^\/api\/documents\/(\d+)$/);
+      if (request.method === "GET" && documentMatch) {
+        const row = await env.DB.prepare("SELECT id, name, mime_type, size, text, created_at, group_name FROM documents WHERE id = ?").bind(Number(documentMatch[1])).first<Record<string, unknown>>();
+        if (!row) return error(request, env, "研发文件不存在", 404);
+        return json(request, env, { document: { id: Number(row.id), name: String(row.name), mimeType: String(row.mime_type), size: Number(row.size), text: String(row.text || ""), createdAt: String(row.created_at), groupName: String(row.group_name || "未分类") } });
+      }
+
+      const documentGroupMatch = url.pathname.match(/^\/api\/documents\/(\d+)\/group$/);
+      if (request.method === "POST" && documentGroupMatch) {
+        const body = await request.json() as { groupName?: string };
+        await env.DB.prepare("UPDATE documents SET group_name = ? WHERE id = ?").bind(String(body.groupName || "未分类").slice(0, 80), Number(documentGroupMatch[1])).run();
+        return json(request, env, { ok: true });
       }
 
       if (request.method === "POST" && url.pathname === "/api/ip-drafts") {
         if (!await enforceGenerationLimit(request, env)) return error(request, env, "本小时生成次数已达上限，请稍后再试", 429);
-        const body = await request.json() as { title?: string; sources?: string[] };
+        const body = await request.json() as { title?: string; sources?: string[]; groupName?: string; model?: string; speed?: string };
         const title = (body.title || "研发成果知识产权材料").slice(0, 200);
+        const groupName = String(body.groupName || "未分类").slice(0, 80);
+        const requestedModel = body.model === "glm-5.3" || body.model === "qwen3" ? body.model : "auto";
+        const speed = body.speed === "fast" || body.speed === "deep" ? body.speed : "balanced";
         const sourceText = await collectSources(env, body.sources || []);
         if (sourceText.length < 80) return error(request, env, "没有找到可用于生成的已入库资料");
         const prompt = `你是一名严谨的中国知识产权材料撰写助手。请基于给定研发资料，输出可供专业人员复核的中文 Markdown 初稿。
@@ -307,22 +361,22 @@ const worker = {
 
 研发资料：
 ${sourceText}`;
-        const glmResponse = env.GLM_API_KEY ? await fetch(GLM_API_URL, {
+        const glmResponse = requestedModel !== "qwen3" && env.GLM_API_KEY ? await fetch(GLM_API_URL, {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${env.GLM_API_KEY}` },
           body: JSON.stringify({
-            model: AI_MODEL,
+            model: "glm-5.3",
             messages: [
               { role: "system", content: "你负责把研发证据转化为结构严谨、边界清楚的知识产权材料初稿。" },
               { role: "user", content: prompt },
             ],
             stream: false,
-            max_tokens: 4200,
-            temperature: 0.25,
+            max_tokens: speed === "fast" ? 2600 : speed === "deep" ? 5600 : 4200,
+            temperature: speed === "deep" ? 0.18 : 0.25,
           }),
         }) : null;
         const result = glmResponse ? await glmResponse.json() as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } } : {};
-        let usedModel = AI_MODEL;
+        let usedModel = requestedModel === "qwen3" ? FALLBACK_AI_MODEL : AI_MODEL;
         let markdown = glmResponse?.ok ? result.choices?.[0]?.message?.content || "" : "";
         if (!markdown.trim()) {
           const fallback = await env.AI.run(FALLBACK_AI_MODEL, {
@@ -330,16 +384,16 @@ ${sourceText}`;
               { role: "system", content: "你负责把研发证据转化为结构严谨、边界清楚的知识产权材料初稿。" },
               { role: "user", content: prompt },
             ],
-            max_tokens: 4200,
-            temperature: 0.25,
+            max_tokens: speed === "fast" ? 2600 : speed === "deep" ? 5600 : 4200,
+            temperature: speed === "deep" ? 0.18 : 0.25,
           });
           markdown = typeof fallback.response === "string" ? fallback.response : typeof fallback.result === "string" ? fallback.result : "";
           usedModel = FALLBACK_AI_MODEL;
         }
         if (!markdown.trim()) throw new Error("GLM 未返回正文内容");
         const sourceRefs = JSON.stringify(body.sources || []);
-        const insert = await env.DB.prepare("INSERT INTO ip_drafts (title, source_refs, markdown, model) VALUES (?, ?, ?, ?)").bind(title, sourceRefs, markdown, usedModel).run();
-        const draft = { id: Number(insert.meta?.last_row_id || 0), title, sourceRefs, markdown, model: usedModel, createdAt: new Date().toISOString() };
+        const insert = await env.DB.prepare("INSERT INTO ip_drafts (title, source_refs, markdown, model, group_name) VALUES (?, ?, ?, ?, ?)").bind(title, sourceRefs, markdown, usedModel, groupName).run();
+        const draft = { id: Number(insert.meta?.last_row_id || 0), title, sourceRefs, markdown, model: usedModel, groupName, createdAt: new Date().toISOString() };
         return json(request, env, { draft }, 201);
       }
 
@@ -351,15 +405,22 @@ ${sourceText}`;
       }
 
       if (request.method === "GET" && url.pathname === "/api/ip-drafts") {
-        const rows = await env.DB.prepare("SELECT id, title, source_refs, markdown, model, created_at FROM ip_drafts ORDER BY created_at DESC LIMIT 20").all<Record<string, unknown>>();
-        return json(request, env, { drafts: rows.results.map((row) => ({ id: Number(row.id), title: String(row.title), sourceRefs: String(row.source_refs), markdown: String(row.markdown), model: String(row.model), createdAt: String(row.created_at) })) });
+        const rows = await env.DB.prepare("SELECT id, title, source_refs, markdown, model, created_at, group_name FROM ip_drafts ORDER BY created_at DESC LIMIT 20").all<Record<string, unknown>>();
+        return json(request, env, { drafts: rows.results.map((row) => ({ id: Number(row.id), title: String(row.title), sourceRefs: String(row.source_refs), markdown: String(row.markdown), model: String(row.model), groupName: String(row.group_name || "未分类"), createdAt: String(row.created_at) })) });
+      }
+
+      const draftGroupMatch = url.pathname.match(/^\/api\/ip-drafts\/(\d+)\/group$/);
+      if (request.method === "POST" && draftGroupMatch) {
+        const body = await request.json() as { groupName?: string };
+        await env.DB.prepare("UPDATE ip_drafts SET group_name = ? WHERE id = ?").bind(String(body.groupName || "未分类").slice(0, 80), Number(draftGroupMatch[1])).run();
+        return json(request, env, { ok: true });
       }
 
       if (request.method === "GET" && url.pathname === "/api/stats") {
         const [paperCount, pending, approved, documents, drafts] = await Promise.all([
           env.DB.prepare("SELECT count(*) AS count FROM papers").first<{ count: number }>(),
           env.DB.prepare("SELECT count(*) AS count FROM papers WHERE status='pending'").first<{ count: number }>(),
-          env.DB.prepare("SELECT count(*) AS count FROM papers WHERE status='approved'").first<{ count: number }>(),
+          env.DB.prepare("SELECT count(*) AS count FROM papers WHERE status='approved' AND library_state='in'").first<{ count: number }>(),
           env.DB.prepare("SELECT count(*) AS count FROM documents").first<{ count: number }>(),
           env.DB.prepare("SELECT count(*) AS count FROM ip_drafts").first<{ count: number }>(),
         ]);

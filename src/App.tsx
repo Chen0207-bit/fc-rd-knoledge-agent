@@ -7,6 +7,9 @@ pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 type View = "dashboard" | "discover" | "review" | "library" | "ip";
 type PaperStatus = "pending" | "approved" | "rejected";
+const GROUPS = ["未分类", "算法研究", "产品技术", "专利候选", "竞品情报"];
+type ModelChoice = "auto" | "glm-5.3" | "qwen3" | "k3";
+type SpeedChoice = "fast" | "balanced" | "deep";
 type Paper = {
   id?: number;
   source: "arxiv" | "semantic_scholar" | "crossref";
@@ -19,9 +22,11 @@ type Paper = {
   pdfUrl?: string;
   status?: PaperStatus;
   reviewerNote?: string;
+  libraryState?: "in" | "removed";
+  groupName?: string;
 };
-type DocumentItem = { id: number; name: string; mimeType: string; size: number; textPreview?: string; createdAt: string };
-type Draft = { id: number; title: string; sourceRefs: string; markdown: string; model: string; createdAt: string };
+type DocumentItem = { id: number; name: string; mimeType: string; size: number; textPreview?: string; text?: string; createdAt: string; groupName?: string };
+type Draft = { id: number; title: string; sourceRefs: string; markdown: string; model: string; groupName?: string; createdAt: string };
 type Stats = { discovered: number; pending: number; approved: number; documents: number; drafts: number };
 
 const API_BASE = (
@@ -82,6 +87,13 @@ export default function App() {
   const [stats, setStats] = useState<Stats>({ discovered: 128, pending: 3, approved: 46, documents: 0, drafts: 7 });
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [draftTitle, setDraftTitle] = useState("智能研发知识处理方法及系统");
+  const [draftGroup, setDraftGroup] = useState("专利候选");
+  const [modelChoice, setModelChoice] = useState<ModelChoice>(IS_LOCAL_DEMO ? "k3" : "auto");
+  const [speedChoice, setSpeedChoice] = useState<SpeedChoice>("balanced");
+  const [generationStep, setGenerationStep] = useState("");
+  const [preview, setPreview] = useState<{ kind: "paper" | "document"; title: string; content: string; url?: string } | null>(null);
+  const [libraryGroup, setLibraryGroup] = useState("全部分组");
+  const [draftGroupFilter, setDraftGroupFilter] = useState("全部分组");
   const [activeDraft, setActiveDraft] = useState<Draft | null>(null);
   const [k3Ready, setK3Ready] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -192,6 +204,35 @@ export default function App() {
     }
   }
 
+  async function changePaperLibrary(id: number, action: "remove" | "restore") {
+    try {
+      await api(`/api/papers/${id}/library`, { method: "POST", body: JSON.stringify({ action }) });
+      notify(action === "remove" ? "论文已出库，记录仍然保留" : "论文已恢复入库");
+      await refresh();
+    } catch (error) { notify(error instanceof Error ? error.message : "出库操作失败"); }
+  }
+
+  async function changeGroup(type: "paper" | "document" | "draft", id: number, groupName: string) {
+    try {
+      await api(`/api/${type === "paper" ? "papers" : type === "document" ? "documents" : "ip-drafts"}/${id}/group`, { method: "POST", body: JSON.stringify({ groupName }) });
+      if (type === "paper") setPapers((items) => items.map((item) => item.id === id ? { ...item, groupName } : item));
+      if (type === "document") setDocuments((items) => items.map((item) => item.id === id ? { ...item, groupName } : item));
+      if (type === "draft") setDrafts((items) => items.map((item) => item.id === id ? { ...item, groupName } : item));
+      notify("分组已更新");
+    } catch (error) { notify(error instanceof Error ? error.message : "分组更新失败"); }
+  }
+
+  async function previewDocument(id: number) {
+    try {
+      const data = await api<{ document: DocumentItem }>(`/api/documents/${id}`);
+      setPreview({ kind: "document", title: data.document.name, content: data.document.text || "暂无可预览文本" });
+    } catch (error) { notify(error instanceof Error ? error.message : "文件预览失败"); }
+  }
+
+  function previewPaper(paper: Paper) {
+    setPreview({ kind: "paper", title: paper.title, content: `作者：${paper.authors.join("、") || "未知"}\n\n摘要：\n${paper.abstract || "暂无摘要"}`, url: paper.url });
+  }
+
   async function uploadDocument(file?: File) {
     if (!file) return;
     setLoading(true);
@@ -216,8 +257,11 @@ export default function App() {
 
   async function generateDraft() {
     if (!selectedSources.length) return notify("请先选择至少一份论文或研发文件");
+    if (IS_LOCAL_DEMO && modelChoice !== "k3") return notify("本地页面目前只支持 K3；公网 Demo 可选择 GLM-5.3 或 Workers AI");
     setLoading(true);
     setActiveDraft(null);
+    setGenerationStep("正在读取已入库资料…");
+    const stepTimer = window.setInterval(() => setGenerationStep((current) => current === "正在读取已入库资料…" ? "正在提炼创新点与技术方案…" : current === "正在提炼创新点与技术方案…" ? "正在组织权利要求结构…" : "正在校验格式与待确认事项…"), 1100);
     try {
       if (IS_LOCAL_DEMO) {
         if (!k3Ready) throw new Error("K3 本地服务未启动，请先运行 npm run k3");
@@ -229,19 +273,21 @@ export default function App() {
         });
         const localData = await response.json();
         if (!response.ok) throw new Error(localData.error || `K3 请求失败（${response.status}）`);
-        const localDraft = localData.draft as Draft;
+        const localDraft = { ...(localData.draft as Draft), groupName: draftGroup };
         setActiveDraft(localDraft);
         setDrafts((current) => [localDraft, ...current]);
         notify("K3 已生成知识产权材料初稿");
         return;
       }
-      const data = await api<{ draft: Draft }>("/api/ip-drafts", { method: "POST", body: JSON.stringify({ title: draftTitle, sources: selectedSources }) });
+      const data = await api<{ draft: Draft }>("/api/ip-drafts", { method: "POST", body: JSON.stringify({ title: draftTitle, sources: selectedSources, groupName: draftGroup, model: modelChoice, speed: speedChoice }) });
       setActiveDraft(data.draft);
       notify("知识产权材料初稿已生成");
       await refresh();
     } catch (error) {
       notify(error instanceof Error ? error.message : "生成失败");
     } finally {
+      window.clearInterval(stepTimer);
+      setGenerationStep("");
       setLoading(false);
     }
   }
@@ -256,7 +302,11 @@ export default function App() {
     URL.revokeObjectURL(url);
   }
 
-  const approvedPapers = useMemo(() => papers.filter((paper) => paper.status === "approved"), [papers]);
+  const approvedPapers = useMemo(() => papers.filter((paper) => paper.status === "approved" && paper.libraryState !== "removed"), [papers]);
+  const removedPapers = useMemo(() => papers.filter((paper) => paper.status === "approved" && paper.libraryState === "removed"), [papers]);
+  const visibleApprovedPapers = useMemo(() => approvedPapers.filter((paper) => libraryGroup === "全部分组" || (paper.groupName || "未分类") === libraryGroup), [approvedPapers, libraryGroup]);
+  const visibleDocuments = useMemo(() => documents.filter((doc) => libraryGroup === "全部分组" || (doc.groupName || "未分类") === libraryGroup), [documents, libraryGroup]);
+  const visibleDrafts = useMemo(() => drafts.filter((draft) => draftGroupFilter === "全部分组" || (draft.groupName || "未分类") === draftGroupFilter), [drafts, draftGroupFilter]);
   const pendingPapers = useMemo(() => papers.filter((paper) => paper.status === "pending"), [papers]);
 
   return (
@@ -325,7 +375,9 @@ export default function App() {
         {view === "library" && (
           <section className="workspace">
             <div className="workspace-head"><div><p className="eyebrow">R&D KNOWLEDGE BASE</p><h2>研发知识库</h2><p>论文与研发文档统一沉淀，为成果转化提供可信上下文。</p></div><><input ref={fileRef} hidden type="file" accept=".pdf,.docx" onChange={(event) => void uploadDocument(event.target.files?.[0])} /><button className="primary" disabled={loading} onClick={() => fileRef.current?.click()}>导入 PDF / DOCX</button></></div>
-            <div className="library-columns"><div><h3>已入库论文 <span>{approvedPapers.length}</span></h3>{approvedPapers.length ? approvedPapers.map((paper) => <PaperRow paper={paper} key={paper.externalId} />) : <EmptyState title="暂无已入库论文" detail="先在审核中心通过一篇论文。" />}</div><div><h3>研发文件 <span>{documents.length}</span></h3>{documents.length ? documents.map((doc) => <div className="doc-row" key={doc.id}><i>DOC</i><div><strong>{doc.name}</strong><p>{Math.round(doc.size / 1024)} KB · {formatDate(doc.createdAt)}</p></div><b>已解析</b></div>) : <EmptyState title="尚未导入研发文件" detail="文件在浏览器本地解析，原文件不会上传。" />}</div></div>
+            <div className="library-toolbar"><label>当前分组<select value={libraryGroup} onChange={(event) => setLibraryGroup(event.target.value)}><option>全部分组</option>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select></label><span>已入库论文 {approvedPapers.length} 篇 · 已出库 {removedPapers.length} 篇</span></div>
+            <div className="library-columns"><div><h3>已入库论文 <span>{visibleApprovedPapers.length}</span></h3>{visibleApprovedPapers.length ? visibleApprovedPapers.map((paper) => <div className="library-item" key={paper.externalId}><PaperRow paper={paper} onPreview={() => previewPaper(paper)} /><div className="item-actions"><select value={paper.groupName || "未分类"} onChange={(event) => void changeGroup("paper", paper.id!, event.target.value)}>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost" onClick={() => previewPaper(paper)}>在线预览</button><button className="ghost danger" onClick={() => void changePaperLibrary(paper.id!, "remove")}>出库</button></div></div>) : <EmptyState title="暂无已入库论文" detail="先在审核中心通过一篇论文。" />}</div><div><h3>研发文件 <span>{visibleDocuments.length}</span></h3>{visibleDocuments.length ? visibleDocuments.map((doc) => <div className="doc-row" key={doc.id}><i>DOC</i><div><strong>{doc.name}</strong><p>{Math.round(doc.size / 1024)} KB · {formatDate(doc.createdAt)} · {doc.groupName || "未分类"}</p></div><select value={doc.groupName || "未分类"} onChange={(event) => void changeGroup("document", doc.id, event.target.value)}>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost" onClick={() => void previewDocument(doc.id)}>预览</button></div>) : <EmptyState title="尚未导入研发文件" detail="文件在浏览器本地解析，原文件不会上传。" />}</div></div>
+            {removedPapers.length ? <div className="removed-panel"><h3>已出库论文</h3>{removedPapers.map((paper) => <div className="removed-row" key={paper.id}><span>{paper.title}</span><button className="ghost" onClick={() => void changePaperLibrary(paper.id!, "restore")}>恢复入库</button></div>)}</div> : null}
           </section>
         )}
 
@@ -333,26 +385,27 @@ export default function App() {
           <section className="workspace">
             <div className="workspace-head"><div><p className="eyebrow">IP DRAFTING AGENT</p><h2>知识产权材料生成</h2><p>基于选定研发资料，生成技术交底书、摘要和权利要求初稿。</p></div><span className="source-pill">{IS_LOCAL_DEMO ? (k3Ready ? "本地 K3 · 已连接" : "本地 K3 · 未连接") : "GLM-5.3 · 自动容错"}</span></div>
             <div className="ip-layout">
-              <div className="source-selector"><label>材料名称<input value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} /></label><h3>选择依据材料</h3>
+              <div className="source-selector"><label>材料名称<input value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} /></label><label>材料分组<select value={draftGroup} onChange={(event) => setDraftGroup(event.target.value)}>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select></label><label>接入模型<select value={modelChoice} onChange={(event) => setModelChoice(event.target.value as ModelChoice)}><option value="auto">自动选择（GLM 优先）</option><option value="glm-5.3">智谱 GLM-5.3</option><option value="qwen3">Workers AI Qwen3</option>{IS_LOCAL_DEMO ? <option value="k3">本机 K3</option> : null}</select></label><label>生成速度<select value={speedChoice} onChange={(event) => setSpeedChoice(event.target.value as SpeedChoice)}><option value="fast">快速：较短初稿</option><option value="balanced">均衡：推荐</option><option value="deep">深度：更完整</option></select></label><h3>选择依据材料</h3>
                 {[...approvedPapers.map((paper) => ({ ref: `paper:${paper.id}`, name: paper.title, type: "论文" })), ...documents.map((doc) => ({ ref: `document:${doc.id}`, name: doc.name, type: "研发文件" }))].map((item) => <label className="source-option" key={item.ref}><input type="checkbox" checked={selectedSources.includes(item.ref)} onChange={() => toggleSource(item.ref)} /><span><b>{item.type}</b><strong>{item.name}</strong></span></label>)}
                 {!approvedPapers.length && !documents.length ? <EmptyState title="暂无可用资料" detail="先审核入库论文或导入研发文件。" /> : null}
-                <button className="primary generate" disabled={loading} onClick={() => void generateDraft()}>{loading ? "Agent 正在生成…" : "生成申报材料"}</button>
+                <button className="primary generate" disabled={loading} onClick={() => void generateDraft()}>{loading ? "Agent 正在生成…" : "生成申报材料"}</button>{loading ? <div className="generation-progress"><div className="progress-track"><i></i></div><strong>{generationStep}</strong><small>展示的是可审计的处理阶段，不暴露模型内部隐式思维。</small></div> : null}
               </div>
               <div className="draft-preview">{activeDraft ? <><div className="draft-head"><div><small>AI GENERATED DRAFT</small><h3>{activeDraft.title}</h3></div><button onClick={() => downloadDraft(activeDraft)}>下载 Markdown</button></div><pre>{activeDraft.markdown}</pre><p className="disclaimer">AI 初稿仅供内部研讨，提交前须由知识产权专业人员审核。</p></> : <EmptyState title="申报材料预览" detail="选择左侧资料后启动 Agent，生成结果将在此展示。" />}</div>
             </div>
-            {drafts.length > 0 ? <div className="history"><h3>最近生成</h3>{drafts.slice(0, 4).map((draft) => <button key={draft.id} onClick={() => setActiveDraft(draft)}><span>{draft.title}</span><small>{formatDate(draft.createdAt)}</small></button>)}</div> : null}
+            {drafts.length > 0 ? <div className="history"><div className="history-head"><h3>最近生成</h3><select value={draftGroupFilter} onChange={(event) => setDraftGroupFilter(event.target.value)}><option>全部分组</option>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select></div>{visibleDrafts.slice(0, 8).map((draft) => <div className="history-row" key={draft.id}><button onClick={() => setActiveDraft(draft)}><span>{draft.title}</span><small>{draft.groupName || "未分类"} · {formatDate(draft.createdAt)}</small></button><select value={draft.groupName || "未分类"} onChange={(event) => void changeGroup("draft", draft.id, event.target.value)}>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select></div>)}</div> : null}
           </section>
         )}
       </main>
 
+      {preview ? <div className="modal-backdrop" onClick={() => setPreview(null)}><div className="preview-modal" onClick={(event) => event.stopPropagation()}><div className="preview-head"><div><p className="eyebrow">ONLINE PREVIEW</p><h2>{preview.title}</h2></div><button className="ghost" onClick={() => setPreview(null)}>关闭</button></div>{preview.kind === "paper" && preview.url ? <a href={preview.url} target="_blank" rel="noreferrer">打开原文 ↗</a> : null}<pre>{preview.content}</pre></div></div> : null}
       {!accessCode || codeInput ? <div className="modal-backdrop"><div className="access-modal"><span className="seal">研</span><p className="eyebrow">SECURE DEMO</p><h2>进入研知 Agent</h2><p>请输入演示访问码。它只保存在当前浏览器会话中，用于保护 AI 调用额度。</p><input autoFocus value={codeInput} onChange={(event) => { setCodeInput(event.target.value); setAuthError(""); }} onKeyDown={(event) => event.key === "Enter" && void unlock()} placeholder="演示访问码" type="password" />{authError ? <div className="form-error">{authError}</div> : null}<button className="primary" disabled={loading} onClick={() => void unlock()}>{loading ? "正在验证…" : "进入工作台"}</button>{accessCode ? <button className="text-button" onClick={() => setCodeInput("")}>取消</button> : null}</div></div> : null}
       {message ? <div className="toast">{message}</div> : null}
     </div>
   );
 }
 
-function PaperRow({ paper }: { paper: Paper }) {
-  return <div className="paper"><span className="source">{sourceLabel(paper.source)}</span><div><strong>{paper.title}</strong><p>{paper.authors.slice(0, 2).join(" · ")} · {formatDate(paper.publishedAt)}</p></div><em className={paper.status === "approved" ? "approved" : ""}>{paper.status === "approved" ? "已入库" : paper.status === "rejected" ? "已驳回" : "待审核"}</em></div>;
+function PaperRow({ paper, onPreview }: { paper: Paper; onPreview?: () => void }) {
+  return <div className="paper" onDoubleClick={onPreview}><span className="source">{sourceLabel(paper.source)}</span><div><strong>{paper.title}</strong><p>{paper.authors.slice(0, 2).join(" · ")} · {formatDate(paper.publishedAt)} · {paper.groupName || "未分类"}</p></div><em className={paper.status === "approved" ? "approved" : ""}>{paper.status === "approved" ? "已入库" : paper.status === "rejected" ? "已驳回" : "待审核"}</em></div>;
 }
 
 function EmptyState({ title, detail }: { title: string; detail: string }) {
