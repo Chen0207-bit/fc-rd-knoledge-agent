@@ -213,12 +213,25 @@ export default function App() {
     }
   }
 
-  async function changePaperLibrary(id: number, action: "remove" | "restore") {
+  async function deletePaper(id: number, title: string) {
+    if (!window.confirm(`确定删除论文“${title}”？删除后不可恢复。`)) return;
     try {
-      await api(`/api/papers/${id}/library`, { method: "POST", body: JSON.stringify({ action }) });
-      notify(action === "remove" ? "论文已出库，记录仍然保留" : "论文已恢复入库");
+      await api(`/api/papers/${id}`, { method: "DELETE" });
+      notify("论文已删除");
       await refresh();
-    } catch (error) { notify(error instanceof Error ? error.message : "出库操作失败"); }
+    } catch (error) { notify(error instanceof Error ? error.message : "论文删除失败"); }
+  }
+
+  async function deleteDocument(id: number, name: string) {
+    if (!window.confirm(`确定删除研发文件“${name}”？删除后不可恢复。`)) return;
+    try { await api(`/api/documents/${id}`, { method: "DELETE" }); notify("研发文件已删除"); await refresh(); }
+    catch (error) { notify(error instanceof Error ? error.message : "文件删除失败"); }
+  }
+
+  async function deleteDraft(id: number, title: string) {
+    if (!window.confirm(`确定删除材料“${title}”？删除后不可恢复。`)) return;
+    try { await api(`/api/ip-drafts/${id}`, { method: "DELETE" }); if (activeDraft?.id === id) setActiveDraft(null); notify("知识产权材料已删除"); await refresh(); }
+    catch (error) { notify(error instanceof Error ? error.message : "材料删除失败"); }
   }
 
   async function changeGroup(type: "paper" | "document" | "draft", id: number, groupName: string) {
@@ -343,7 +356,6 @@ export default function App() {
   }
 
   const approvedPapers = useMemo(() => papers.filter((paper) => paper.status === "approved" && paper.libraryState !== "removed"), [papers]);
-  const removedPapers = useMemo(() => papers.filter((paper) => paper.status === "approved" && paper.libraryState === "removed"), [papers]);
   const visibleApprovedPapers = useMemo(() => approvedPapers.filter((paper) => libraryGroup === "全部分组" || (paper.groupName || "未分类") === libraryGroup), [approvedPapers, libraryGroup]);
   const visibleDocuments = useMemo(() => documents.filter((doc) => libraryGroup === "全部分组" || (doc.groupName || "未分类") === libraryGroup), [documents, libraryGroup]);
   const visibleDrafts = useMemo(() => drafts.filter((draft) => draftGroupFilter === "全部分组" || (draft.groupName || "未分类") === draftGroupFilter), [drafts, draftGroupFilter]);
@@ -415,9 +427,8 @@ export default function App() {
         {view === "library" && (
           <section className="workspace">
             <div className="workspace-head"><div><p className="eyebrow">R&D KNOWLEDGE BASE</p><h2>研发知识库</h2><p>论文与研发文档统一沉淀，为成果转化提供可信上下文。</p></div><><input ref={fileRef} hidden type="file" accept=".pdf,.docx" onChange={(event) => void uploadDocument(event.target.files?.[0])} /><button className="primary" disabled={loading} onClick={() => fileRef.current?.click()}>导入 PDF / DOCX</button></></div>
-            <div className="library-toolbar"><label>当前分组<select value={libraryGroup} onChange={(event) => setLibraryGroup(event.target.value)}><option>全部分组</option>{allGroups.map((group) => <option key={group}>{group}</option>)}</select></label><button className="ghost" onClick={createCustomGroup}>+ 新建分组</button><span>已入库论文 {approvedPapers.length} 篇 · 已出库 {removedPapers.length} 篇</span></div>
-            <div className="library-columns"><div><h3>已入库论文 <span>{visibleApprovedPapers.length}</span></h3>{visibleApprovedPapers.length ? visibleApprovedPapers.map((paper) => <div className="library-item" key={paper.externalId}><PaperRow paper={paper} onPreview={() => previewPaper(paper)} /><div className="item-actions"><select value={paper.groupName || "未分类"} onChange={(event) => void changeGroup("paper", paper.id!, event.target.value)}>{allGroups.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost" onClick={() => previewPaper(paper)}>在线预览</button><button className="ghost danger" onClick={() => void changePaperLibrary(paper.id!, "remove")}>出库</button></div></div>) : <EmptyState title="暂无已入库论文" detail="先在审核中心通过一篇论文。" />}</div><div><h3>研发文件 <span>{visibleDocuments.length}</span></h3>{visibleDocuments.length ? visibleDocuments.map((doc) => <div className="doc-row" key={doc.id}><i>DOC</i><div><strong>{doc.name}</strong><p>{Math.round(doc.size / 1024)} KB · {formatDate(doc.createdAt)} · {doc.groupName || "未分类"}</p></div><select value={doc.groupName || "未分类"} onChange={(event) => void changeGroup("document", doc.id, event.target.value)}>{allGroups.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost" onClick={() => void previewDocument(doc.id)}>预览</button></div>) : <EmptyState title="尚未导入研发文件" detail="文件在浏览器本地解析，原文件不会上传。" />}</div></div>
-            {removedPapers.length ? <div className="removed-panel"><h3>已出库论文</h3>{removedPapers.map((paper) => <div className="removed-row" key={paper.id}><span>{paper.title}</span><button className="ghost" onClick={() => void changePaperLibrary(paper.id!, "restore")}>恢复入库</button></div>)}</div> : null}
+            <div className="library-toolbar"><label>当前分组<select value={libraryGroup} onChange={(event) => setLibraryGroup(event.target.value)}><option>全部分组</option>{allGroups.map((group) => <option key={group}>{group}</option>)}</select></label><button className="ghost" onClick={createCustomGroup}>+ 新建分组</button><span>已入库论文 {approvedPapers.length} 篇</span></div>
+            <div className="library-columns"><div><h3>已入库论文 <span>{visibleApprovedPapers.length}</span></h3>{visibleApprovedPapers.length ? visibleApprovedPapers.map((paper) => <div className="library-item" key={paper.externalId}><PaperRow paper={paper} onPreview={() => previewPaper(paper)} /><div className="item-actions"><select value={paper.groupName || "未分类"} onChange={(event) => void changeGroup("paper", paper.id!, event.target.value)}>{allGroups.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost" onClick={() => previewPaper(paper)}>在线预览</button><button className="ghost danger" onClick={() => void deletePaper(paper.id!, paper.title)}>删除</button></div></div>) : <EmptyState title="暂无已入库论文" detail="先在审核中心通过一篇论文。" />}</div><div><h3>研发文件 <span>{visibleDocuments.length}</span></h3>{visibleDocuments.length ? visibleDocuments.map((doc) => <div className="doc-row" key={doc.id}><i>DOC</i><div><strong>{doc.name}</strong><p>{Math.round(doc.size / 1024)} KB · {formatDate(doc.createdAt)} · {doc.groupName || "未分类"}</p></div><select value={doc.groupName || "未分类"} onChange={(event) => void changeGroup("document", doc.id, event.target.value)}>{allGroups.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost" onClick={() => void previewDocument(doc.id)}>预览</button><button className="ghost danger" onClick={() => void deleteDocument(doc.id, doc.name)}>删除</button></div>) : <EmptyState title="尚未导入研发文件" detail="文件在浏览器本地解析，原文件不会上传。" />}</div></div>
           </section>
         )}
 
@@ -432,7 +443,7 @@ export default function App() {
               </div>
               <div className="draft-preview">{activeDraft ? <><div className="draft-head"><div><small>AI GENERATED DRAFT</small><h3>{activeDraft.title}</h3></div><button onClick={() => downloadDraft(activeDraft)}>下载 Markdown</button></div><pre>{activeDraft.markdown}</pre><p className="disclaimer">AI 初稿仅供内部研讨，提交前须由知识产权专业人员审核。</p></> : <EmptyState title="申报材料预览" detail="选择左侧资料后启动 Agent，生成结果将在此展示。" />}</div>
             </div>
-            {drafts.length > 0 ? <div className="history"><div className="history-head"><h3>最近生成</h3><select value={draftGroupFilter} onChange={(event) => setDraftGroupFilter(event.target.value)}><option>全部分组</option>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select></div>{visibleDrafts.slice(0, 8).map((draft) => <div className="history-row" key={draft.id}><button onClick={() => setActiveDraft(draft)}><span>{draft.title}</span><small>{draft.groupName || "未分类"} · {formatDate(draft.createdAt)}</small></button><select value={draft.groupName || "未分类"} onChange={(event) => void changeGroup("draft", draft.id, event.target.value)}>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select></div>)}</div> : null}
+            {drafts.length > 0 ? <div className="history"><div className="history-head"><h3>最近生成</h3><select value={draftGroupFilter} onChange={(event) => setDraftGroupFilter(event.target.value)}><option>全部分组</option>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select></div>{visibleDrafts.slice(0, 8).map((draft) => <div className="history-row" key={draft.id}><button onClick={() => setActiveDraft(draft)}><span>{draft.title}</span><small>{draft.groupName || "未分类"} · {formatDate(draft.createdAt)}</small></button><select value={draft.groupName || "未分类"} onChange={(event) => void changeGroup("draft", draft.id, event.target.value)}>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost danger compact-delete" onClick={() => void deleteDraft(draft.id, draft.title)}>删除</button></div>)}</div> : null}
           </section>
         )}
       </main>

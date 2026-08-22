@@ -43,7 +43,7 @@ function responseHeaders(request: Request, env: Env) {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": allowed ? origin : env.ALLOWED_ORIGIN,
     "access-control-allow-headers": "content-type,x-demo-code",
-    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
     "vary": "origin",
   };
 }
@@ -331,6 +331,12 @@ const worker = {
         return json(request, env, { ok: true });
       }
 
+      const paperDeleteMatch = url.pathname.match(/^\/api\/papers\/(\d+)$/);
+      if (request.method === "DELETE" && paperDeleteMatch) {
+        await env.DB.prepare("DELETE FROM papers WHERE id = ?").bind(Number(paperDeleteMatch[1])).run();
+        return json(request, env, { ok: true });
+      }
+
       if (request.method === "POST" && url.pathname === "/api/documents") {
         const body = await request.json() as { name?: string; mimeType?: string; size?: number; text?: string; groupName?: string };
         if (!body.name || !body.text || body.text.trim().length < 80) return error(request, env, "研发文件文本不足");
@@ -355,6 +361,12 @@ const worker = {
       if (request.method === "POST" && documentGroupMatch) {
         const body = await request.json() as { groupName?: string };
         await env.DB.prepare("UPDATE documents SET group_name = ? WHERE id = ?").bind(String(body.groupName || "未分类").slice(0, 80), Number(documentGroupMatch[1])).run();
+        return json(request, env, { ok: true });
+      }
+
+      const documentDeleteMatch = url.pathname.match(/^\/api\/documents\/(\d+)$/);
+      if (request.method === "DELETE" && documentDeleteMatch) {
+        await env.DB.prepare("DELETE FROM documents WHERE id = ?").bind(Number(documentDeleteMatch[1])).run();
         return json(request, env, { ok: true });
       }
 
@@ -442,6 +454,12 @@ ${sourceText}`;
       if (request.method === "POST" && draftGroupMatch) {
         const body = await request.json() as { groupName?: string };
         await env.DB.prepare("UPDATE ip_drafts SET group_name = ? WHERE id = ?").bind(String(body.groupName || "未分类").slice(0, 80), Number(draftGroupMatch[1])).run();
+        return json(request, env, { ok: true });
+      }
+
+      const draftDeleteMatch = url.pathname.match(/^\/api\/ip-drafts\/(\d+)$/);
+      if (request.method === "DELETE" && draftDeleteMatch) {
+        await env.DB.prepare("DELETE FROM ip_drafts WHERE id = ?").bind(Number(draftDeleteMatch[1])).run();
         return json(request, env, { ok: true });
       }
 
