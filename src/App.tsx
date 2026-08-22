@@ -43,6 +43,14 @@ type DraftStage = "ai_draft" | "rd_review" | "ip_review" | "agency" | "final";
 type Stats = { discovered: number; pending: number; approved: number; documents: number; drafts: number };
 
 const DEFAULT_AI_CONFIG: AIConfig = { enabled: false, provider: "glm", endpoint: "https://open.bigmodel.cn/api/paas/v4", apiKey: "", model: "glm-5.3", remember: false };
+function initializeStyleDefaults() {
+  if (!localStorage.getItem("rd-style-default-v2")) {
+    localStorage.removeItem("rd-ui-preset");
+    localStorage.removeItem("rd-theme-preference");
+    localStorage.setItem("rd-style-default-v2", "1");
+  }
+}
+initializeStyleDefaults();
 function readAIConfig(): AIConfig {
   try {
     const raw = sessionStorage.getItem("rd-ai-config") || localStorage.getItem("rd-ai-config");
@@ -314,8 +322,8 @@ async function extractFile(file: File) {
 export default function App() {
   const [view, setView] = useState<View>("dashboard");
   const [aiFocus, setAIFocus] = useState(false);
-  const [uiPreset, setUiPreset] = useState<UIPreset>(() => (localStorage.getItem("rd-ui-preset") as UIPreset) || "cloudflare");
-  const [themePreference, setThemePreference] = useState<ThemePreference>(() => (localStorage.getItem("rd-theme-preference") as ThemePreference) || "system");
+  const [uiPreset, setUiPreset] = useState<UIPreset>(() => (localStorage.getItem("rd-ui-preset") as UIPreset) || "classic");
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => (localStorage.getItem("rd-theme-preference") as ThemePreference) || "light");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [aiConfig, setAIConfig] = useState<AIConfig>(readAIConfig);
   const [projects, setProjects] = useState<Project[]>([]);
