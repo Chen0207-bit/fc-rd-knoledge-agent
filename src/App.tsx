@@ -12,6 +12,7 @@ try { GROUPS.push(...(JSON.parse(localStorage.getItem("rd-custom-groups") || "[]
 type ModelChoice = "auto" | "glm-5.3" | "qwen3" | "k3";
 type SpeedChoice = "fast" | "balanced" | "deep";
 type ChatMessage = { role: "user" | "assistant"; content: string; model?: string };
+type Project = { id: number; name: string; description: string; createdAt?: string; updatedAt?: string };
 type Paper = {
   id?: number;
   source: "arxiv" | "semantic_scholar" | "crossref";
@@ -74,6 +75,10 @@ async function extractFile(file: File) {
 
 export default function App() {
   const [view, setView] = useState<View>("dashboard");
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState(() => Number(localStorage.getItem("rd-active-project") || 1));
+  const [projectModalOpen, setProjectModalOpen] = useState(false);
+  const [projectForm, setProjectForm] = useState({ name: "", description: "" });
   const [accessCode, setAccessCode] = useState(() => sessionStorage.getItem("demo-access-code") || "");
   const [codeInput, setCodeInput] = useState("");
   const [connected, setConnected] = useState(false);
@@ -107,7 +112,9 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const api = useCallback(async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
-    const response = await fetch(`${API_BASE}${path}`, {
+    const target = new URL(`${API_BASE}${path}`);
+    target.searchParams.set("project_id", String(activeProjectId));
+    const response = await fetch(target.toString(), {
       ...options,
       headers: { "content-type": "application/json", ...(accessCode ? { "x-demo-code": accessCode } : {}), ...(options.headers || {}) },
     });
@@ -118,17 +125,20 @@ export default function App() {
       throw error;
     }
     return payload as T;
-  }, [accessCode]);
+  }, [accessCode, activeProjectId]);
 
   const refresh = useCallback(async () => {
     if (!accessCode) return;
     try {
-      const [paperData, documentData, draftData, statData] = await Promise.all([
+      const [projectData, paperData, documentData, draftData, statData] = await Promise.all([
+        api<{ projects: Project[] }>("/api/projects"),
         api<{ papers: Paper[] }>("/api/papers"),
         api<{ documents: DocumentItem[] }>("/api/documents"),
         api<{ drafts: Draft[] }>("/api/ip-drafts"),
         api<Stats>("/api/stats"),
       ]);
+      setProjects(projectData.projects);
+      if (!projectData.projects.some((project) => project.id === activeProjectId) && projectData.projects[0]) setActiveProjectId(projectData.projects[0].id);
       setPapers(paperData.papers);
       setDocuments(documentData.documents);
       setDrafts(draftData.drafts);
@@ -143,10 +153,11 @@ export default function App() {
         setAuthError("访问码已失效，请重新输入");
       }
     }
-  }, [accessCode, api]);
+  }, [accessCode, activeProjectId, api]);
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => { localStorage.setItem("rd-custom-groups", JSON.stringify(customGroups)); }, [customGroups]);
+  useEffect(() => { localStorage.setItem("rd-active-project", String(activeProjectId)); }, [activeProjectId]);
   useEffect(() => { sessionStorage.setItem("rd-agent-chat", JSON.stringify(chatMessages.slice(-20))); }, [chatMessages]);
 
   useEffect(() => {
@@ -158,6 +169,40 @@ export default function App() {
     setMessage(text);
     window.setTimeout(() => setMessage(""), 3200);
   };
+
+  function switchProject(projectId: number) {
+    setActiveProjectId(projectId);
+    setSearchResults([]);
+    setSelectedSources([]);
+    setActiveDraft(null);
+    setChatMessages([]);
+    notify("已切换项目，正在加载独立知识闭环");
+  }
+
+  async function saveProject() {
+    const name = projectForm.name.trim();
+    if (!name) return notify("请填写项目名称");
+    try {
+      const data = await api<{ project: Project }>("/api/projects", { method: "POST", body: JSON.stringify(projectForm) });
+      setProjects((items) => [...items, data.project]);
+      setProjectModalOpen(false);
+      setProjectForm({ name: "", description: "" });
+      switchProject(data.project.id);
+    } catch (error) { notify(error instanceof Error ? error.message : "项目创建失败"); }
+  }
+
+  async function renameProject() {
+    const current = projects.find((project) => project.id === activeProjectId);
+    if (!current) return;
+    const name = window.prompt("项目名称", current.name)?.trim();
+    if (!name || name === current.name) return;
+    const description = window.prompt("项目介绍", current.description) ?? current.description;
+    try {
+      await api(`/api/projects/${activeProjectId}`, { method: "POST", body: JSON.stringify({ name, description }) });
+      setProjects((items) => items.map((project) => project.id === activeProjectId ? { ...project, name, description } : project));
+      notify("项目资料已更新");
+    } catch (error) { notify(error instanceof Error ? error.message : "项目更新失败"); }
+  }
 
   async function unlock() {
     const candidate = codeInput.trim();
@@ -360,6 +405,19 @@ export default function App() {
   const visibleApprovedPapers = useMemo(() => approvedPapers.filter((paper) => libraryGroup === "全部分组" || (paper.groupName || "未分类") === libraryGroup), [approvedPapers, libraryGroup]);
   const visibleDocuments = useMemo(() => documents.filter((doc) => libraryGroup === "全部分组" || (doc.groupName || "未分类") === libraryGroup), [documents, libraryGroup]);
   const visibleDrafts = useMemo(() => drafts.filter((draft) => draftGroupFilter === "全部分组" || (draft.groupName || "未分类") === draftGroupFilter), [drafts, draftGroupFilter]);
+  const activeProject = projects.find((project) => project.id === activeProjectId) || projects[0];
+  const flowSteps = useMemo(() => {
+    const discovered = stats.discovered > 0;
+    const reviewed = discovered && stats.pending === 0;
+    const stored = stats.approved + stats.documents > 0;
+    const converted = stats.drafts > 0;
+    return [
+      ["01", "发现", "arXiv + Semantic Scholar", discovered ? "done" : "current"],
+      ["02", "审核", "证据与质量校验", reviewed ? "done" : discovered ? "current" : ""],
+      ["03", "沉淀", "论文与研发文件入库", stored ? "done" : reviewed ? "current" : ""],
+      ["04", "转化", "生成知识产权材料", converted ? "done" : stored ? "current" : ""],
+    ] as Array<[string, string, string, string]>;
+  }, [stats]);
   const pendingPapers = useMemo(() => papers.filter((paper) => paper.status === "pending"), [papers]);
 
   return (
@@ -384,16 +442,16 @@ export default function App() {
       <main>
         <header>
           <div><p className="eyebrow">研发知识与成果转化中心</p><h1>{view === "dashboard" ? "早上好，研发负责人" : ({ discover: "论文雷达", review: "审核中心", library: "研发知识库", ip: "知识产权材料" } as Record<string, string>)[view]}</h1></div>
-          <div className="top-actions"><span className={connected ? "live-dot" : "live-dot offline"}>{connected ? "Agent 在线" : "等待访问码"}</span><button className="avatar" onClick={() => setCodeInput(accessCode)}>FC</button></div>
+          <div className="top-actions"><div className="project-switcher"><select value={activeProjectId} onChange={(event) => switchProject(Number(event.target.value))}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><button onClick={renameProject} title="编辑当前项目">编辑</button><button onClick={() => setProjectModalOpen(true)} title="新增项目">＋项目</button></div><span className={connected ? "live-dot" : "live-dot offline"}>{connected ? "Agent 在线" : "等待访问码"}</span><button className="avatar" onClick={() => setCodeInput(accessCode)}>FC</button></div>
         </header>
 
         {view === "dashboard" && (
           <>
             <section className="hero">
-              <div><span className="hero-label">AGENT WORKFLOW</span><h2>把分散的研究，<br/>变成可沉淀的创新资产。</h2><p>自动发现论文、审核入库，再从研发资料生成知识产权材料初稿。</p><div className="hero-actions"><button className="primary" onClick={() => setView("discover")}>启动论文采集 <span>→</span></button><button className="chat-launch" onClick={() => setChatOpen(true)}>与 Agent 对话 <span>⌁</span></button></div></div>
+              <div><span className="hero-label">当前项目 · {activeProject?.name || "默认研发项目"}</span><h2>把分散的研究，<br/>变成可沉淀的创新资产。</h2><p>{activeProject?.description || "自动发现论文、审核入库，再从研发资料生成知识产权材料初稿。"}</p><div className="hero-actions"><button className="primary" onClick={() => setView("discover")}>启动论文采集 <span>→</span></button><button className="chat-launch" onClick={() => setChatOpen(true)}>与 Agent 对话 <span>⌁</span></button></div></div>
               <div className="flow-card">
                 <div className="flow-head"><span>研发知识闭环</span><b>真实流程</b></div>
-                {[["01","发现","arXiv + Semantic Scholar","done"],["02","审核","证据与质量校验","done"],["03","沉淀","论文与研发文件入库","current"],["04","转化","生成知识产权材料",""]].map(([n,t,d,s])=><div className={`flow-row ${s}`} key={n}><i>{s==="done"?"✓":n}</i><div><strong>{t}</strong><span>{d}</span></div><b>{s==="current"?"进行中":"›"}</b></div>)}
+                {flowSteps.map(([n,t,d,s])=><div className={`flow-row ${s}`} key={n}><i>{s==="done"?"✓":n}</i><div><strong>{t}</strong><span>{d}</span></div><b>{s==="current"?"进行中":s==="done"?"已完成":"待开始"}</b></div>)}
               </div>
             </section>
             <section className="stats">
@@ -451,6 +509,7 @@ export default function App() {
 
       {chatOpen ? <aside className={`chat-window${chatMinimized ? " minimized" : ""}`}><div className="chat-head"><div onClick={() => setChatMinimized((value) => !value)}><p className="eyebrow">RESEARCH COPILOT</p><strong>与研知 Agent 对话</strong><small>{chatMinimized ? "点击恢复对话" : "会话会持续到本次浏览器会话结束"}</small></div><div className="chat-window-actions"><button title={chatMinimized ? "恢复" : "最小化"} onClick={() => setChatMinimized((value) => !value)}>{chatMinimized ? "□" : "—"}</button><button title="关闭" onClick={() => setChatOpen(false)}>×</button></div></div>{!chatMinimized ? <><div className="chat-body">{chatMessages.length ? chatMessages.map((item, index) => <div className={`chat-bubble ${item.role}`} key={`${item.role}-${index}`}><p>{item.content}</p>{item.model ? <small>{item.model}</small> : null}</div>) : <div className="chat-welcome"><strong>先从研究方向开始</strong><p>例如：“我想做工业视觉缺陷检测，帮我拆分检索主题和筛选标准。”</p></div>}{chatBusy ? <div className="chat-bubble assistant typing">Agent 正在整理建议…</div> : null}</div><div className="chat-compose"><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder="讨论论文方向、关键词或转化思路…" rows={2} /><button className="primary" disabled={chatBusy || !chatInput.trim()} onClick={() => void sendChat()}>发送</button></div></> : null}</aside> : null}
       {preview ? <div className="modal-backdrop" onClick={() => setPreview(null)}><div className="preview-modal" onClick={(event) => event.stopPropagation()}><div className="preview-head"><div><p className="eyebrow">ONLINE PREVIEW</p><h2>{preview.title}</h2></div><button className="ghost" onClick={() => setPreview(null)}>关闭</button></div>{preview.kind === "paper" && preview.url ? <a href={preview.url} target="_blank" rel="noreferrer">打开原文 ↗</a> : null}<pre>{preview.content}</pre></div></div> : null}
+      {projectModalOpen ? <div className="modal-backdrop" onClick={() => setProjectModalOpen(false)}><div className="project-modal" onClick={(event) => event.stopPropagation()}><p className="eyebrow">NEW PROJECT</p><h2>新增研发项目</h2><p>项目之间的论文、研发文件、审核任务和申报材料相互隔离。</p><label>项目名称<input autoFocus value={projectForm.name} onChange={(event) => setProjectForm((form) => ({ ...form, name: event.target.value }))} placeholder="例如：工业视觉缺陷检测" /></label><label>项目介绍<textarea value={projectForm.description} onChange={(event) => setProjectForm((form) => ({ ...form, description: event.target.value }))} placeholder="描述研发目标、范围或负责人关注点" rows={4} /></label><div className="project-modal-actions"><button className="ghost" onClick={() => setProjectModalOpen(false)}>取消</button><button className="primary" onClick={() => void saveProject()}>创建并进入</button></div></div></div> : null}
       {!accessCode || codeInput ? <div className="modal-backdrop"><div className="access-modal"><span className="seal">研</span><p className="eyebrow">SECURE DEMO</p><h2>进入研知 Agent</h2><p>请输入演示访问码。它只保存在当前浏览器会话中，用于保护 AI 调用额度。</p><input autoFocus value={codeInput} onChange={(event) => { setCodeInput(event.target.value); setAuthError(""); }} onKeyDown={(event) => event.key === "Enter" && void unlock()} placeholder="演示访问码" type="password" />{authError ? <div className="form-error">{authError}</div> : null}<button className="primary" disabled={loading} onClick={() => void unlock()}>{loading ? "正在验证…" : "进入工作台"}</button>{accessCode ? <button className="text-button" onClick={() => setCodeInput("")}>取消</button> : null}</div></div> : null}
       {message ? <div className="toast">{message}</div> : null}
     </div>

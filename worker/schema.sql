@@ -1,5 +1,15 @@
+CREATE TABLE IF NOT EXISTS projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO projects (id, name, description) SELECT 1, '默认研发项目', '用于演示论文搜集、研发知识沉淀与知识产权转化。' WHERE NOT EXISTS (SELECT 1 FROM projects WHERE id = 1);
+
 CREATE TABLE IF NOT EXISTS papers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL DEFAULT 1,
   source TEXT NOT NULL,
   external_id TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -21,6 +31,7 @@ CREATE INDEX IF NOT EXISTS idx_papers_library_group ON papers(library_state, gro
 
 CREATE TABLE IF NOT EXISTS documents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL DEFAULT 1,
   name TEXT NOT NULL,
   mime_type TEXT NOT NULL DEFAULT '',
   size INTEGER NOT NULL DEFAULT 0,
@@ -31,6 +42,7 @@ CREATE TABLE IF NOT EXISTS documents (
 
 CREATE TABLE IF NOT EXISTS ip_drafts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL DEFAULT 1,
   title TEXT NOT NULL,
   source_refs TEXT NOT NULL DEFAULT '[]',
   markdown TEXT NOT NULL,
