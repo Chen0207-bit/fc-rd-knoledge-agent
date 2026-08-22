@@ -11,6 +11,8 @@ type UIPreset = "classic" | "cloudflare" | "gpt";
 type ThemePreference = "system" | "light" | "dark";
 type AIProvider = "glm" | "openai-compatible" | "k3";
 type AIConfig = { enabled: boolean; provider: AIProvider; endpoint: string; apiKey: string; model: string; remember: boolean };
+type TraceStep = { label: string; detail: string; status: "pending" | "active" | "done" | "error" };
+type ResumeTask = { fileName: string; stage: string; updatedAt: string };
 type PaperStatus = "pending" | "approved" | "rejected";
 const GROUPS = ["未分类", "算法研究", "产品技术", "专利候选", "竞品情报"];
 try { GROUPS.push(...(JSON.parse(localStorage.getItem("rd-custom-groups") || "[]") as string[]).filter((group) => !GROUPS.includes(group))); } catch { /* first visit */ }
@@ -44,6 +46,9 @@ function readAIConfig(): AIConfig {
     const raw = sessionStorage.getItem("rd-ai-config") || localStorage.getItem("rd-ai-config");
     return raw ? { ...DEFAULT_AI_CONFIG, ...(JSON.parse(raw) as Partial<AIConfig>) } : DEFAULT_AI_CONFIG;
   } catch { return DEFAULT_AI_CONFIG; }
+}
+function readResumeTask(): ResumeTask | null {
+  try { return JSON.parse(sessionStorage.getItem("rd-resume-task") || "null") as ResumeTask | null; } catch { return null; }
 }
 
 const API_BASE = (
@@ -132,6 +137,9 @@ export default function App() {
   const [workflowStage, setWorkflowStage] = useState("");
   const [workflowCandidates, setWorkflowCandidates] = useState<Paper[]>([]);
   const [workflowDocumentId, setWorkflowDocumentId] = useState<number | null>(null);
+  const [reasoningTrace, setReasoningTrace] = useState<TraceStep[]>([]);
+  const [selectedReviewIds, setSelectedReviewIds] = useState<number[]>([]);
+  const [resumeTask, setResumeTask] = useState<ResumeTask | null>(readResumeTask);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => { try { return JSON.parse(sessionStorage.getItem("rd-agent-chat") || "[]") as ChatMessage[]; } catch { return []; } });
   const [activeDraft, setActiveDraft] = useState<Draft | null>(null);
   const [k3Ready, setK3Ready] = useState(false);
@@ -200,6 +208,29 @@ export default function App() {
     setMessage(text);
     window.setTimeout(() => setMessage(""), 3200);
   };
+
+  function startTrace(steps: Array<[string, string]>) {
+    setReasoningTrace(steps.map(([label, detail], index) => ({ label, detail, status: index === 0 ? "active" : "pending" })));
+  }
+
+  function advanceTrace(index: number, detail?: string) {
+    setReasoningTrace((steps) => steps.map((step, stepIndex) => ({ ...step, status: stepIndex < index ? "done" : stepIndex === index ? "active" : "pending", detail: stepIndex === index && detail ? detail : step.detail })));
+  }
+
+  function finishTrace(detail?: string, error = false) {
+    setReasoningTrace((steps) => steps.map((step, index) => ({ ...step, status: error && index === steps.length - 1 ? "error" : "done", detail: detail && index === steps.length - 1 ? detail : step.detail })));
+  }
+
+  function saveResumeTask(fileName: string, stage: string) {
+    const task = { fileName, stage, updatedAt: new Date().toISOString() };
+    setResumeTask(task);
+    sessionStorage.setItem("rd-resume-task", JSON.stringify(task));
+  }
+
+  function clearResumeTask() {
+    setResumeTask(null);
+    sessionStorage.removeItem("rd-resume-task");
+  }
 
   function saveAISettings() {
     const next = { ...aiConfig, endpoint: aiConfig.endpoint.trim().replace(/\/$/, ""), model: aiConfig.model.trim() || "glm-5.3" };
@@ -308,6 +339,23 @@ export default function App() {
     }
   }
 
+  async function batchReview(status: "approved" | "rejected") {
+    if (!selectedReviewIds.length) return notify("请先选择论文");
+    const count = selectedReviewIds.length;
+    setLoading(true);
+    startTrace([["读取审核队列", `选择了 ${count} 篇待审核论文`], ["逐项核验", "检查来源、摘要和当前项目相关性"], ["批量写入结果", status === "approved" ? "通过并写入研发知识库" : "驳回并标记为不纳入"], ["刷新待办", "更新审核队列和知识资产统计"]]);
+    try {
+      advanceTrace(1);
+      await Promise.all(selectedReviewIds.map((id) => api(`/api/papers/${id}/review`, { method: "POST", body: JSON.stringify({ status, note: status === "approved" ? "批量审核通过，来源和相关性符合当前研发方向" : "批量审核驳回，与当前研发方向相关性不足" }) })));
+      advanceTrace(2);
+      await refresh();
+      setSelectedReviewIds([]);
+      finishTrace(`已完成 ${status === "approved" ? "通过" : "驳回"} ${count} 篇论文`);
+      notify(status === "approved" ? `已批量入库 ${count} 篇论文` : `已批量驳回 ${count} 篇论文`);
+    } catch (error) { finishTrace(error instanceof Error ? error.message : "批量审核失败", true); notify(error instanceof Error ? error.message : "批量审核失败"); }
+    finally { setLoading(false); }
+  }
+
   async function deletePaper(id: number, title: string) {
     if (!window.confirm(`确定删除论文“${title}”？删除后不可恢复。`)) return;
     try {
@@ -364,28 +412,40 @@ export default function App() {
     setChatMessages(nextMessages);
     setChatInput("");
     setChatBusy(true);
+    startTrace([["识别任务", `识别为对话请求：${content.slice(0, 46)}`], ["读取上下文", "读取当前项目、页面和已有任务状态"], ["组织回答", "调用已启用模型生成可执行建议"], ["边界检查", "检查是否包含无依据结论或需要人工确认的动作"]]);
     try {
+      advanceTrace(1);
       const data = await api<{ reply: string; model: string }>("/api/assistant-chat", { method: "POST", body: JSON.stringify({ messages: nextMessages, context: chatContext() }) });
+      advanceTrace(2, `已使用 ${data.model} 返回结果`);
       setChatMessages((messages) => [...messages, { role: "assistant", content: data.reply, model: data.model }]);
-    } catch (error) { notify(error instanceof Error ? error.message : "Agent 对话失败"); }
+      finishTrace("回答已生成，可继续追问或确认下一步");
+    } catch (error) { finishTrace(error instanceof Error ? error.message : "Agent 对话失败", true); notify(error instanceof Error ? error.message : "Agent 对话失败"); }
     finally { setChatBusy(false); }
   }
 
   async function runFileWorkflow(file?: File) {
     if (!file || chatBusy) return;
     setChatBusy(true);
+    saveResumeTask(file.name, "正在生成 Workflow Plan");
     setChatMessages((messages) => [...messages, { role: "user", content: `请先为研发文件制定 Workflow Plan：${file.name}` }]);
+    startTrace([["识别输入", `收到研发文件：${file.name}`], ["提取文本", "在浏览器本地读取 PDF / DOCX 文本"], ["提炼技术事实", "提取对象、方法、工程约束和评价指标"], ["制定检索 Plan", "生成互补检索主题、筛选标准和证据映射"], ["等待确认", "计划生成后由用户确认再执行"]]);
     try {
       setWorkflowStage("正在本地解析文件并提炼计划…");
+      saveResumeTask(file.name, "等待确认 Workflow Plan");
+      advanceTrace(1);
       const text = await extractFile(file);
+      advanceTrace(2, `已提取 ${text.length.toLocaleString()} 个字符`);
       const data = await api<{ plan: WorkflowPlan; model: string }>("/api/assistant-plan", { method: "POST", body: JSON.stringify({ sourceText: text, fileName: file.name, projectDescription: activeProject?.description || "" }) });
+      advanceTrace(3, `已生成 ${data.plan.searchQueries.length} 组检索主题`);
       setWorkflowPlan({ ...data.plan, model: data.model });
       setWorkflowFile(file);
       setWorkflowText(text);
       setWorkflowStage("");
+      finishTrace("Plan 已生成，等待用户确认");
       setChatMessages((messages) => [...messages, { role: "assistant", content: "我已经根据文件内容拟好执行计划，请确认后再开始搜索、初审和转化。" }]);
     } catch (error) {
       setWorkflowStage("");
+      finishTrace(error instanceof Error ? error.message : "Workflow Plan 生成失败", true);
       setChatMessages((messages) => [...messages, { role: "assistant", content: error instanceof Error ? error.message : "Workflow Plan 生成失败" }]);
     } finally {
       setChatBusy(false);
@@ -396,23 +456,30 @@ export default function App() {
   async function confirmFileWorkflow() {
     if (!workflowPlan || !workflowFile || chatBusy) return;
     setChatBusy(true);
+    startTrace([["确认 Plan", "用户已确认执行检索计划"], ["导入研发文件", "保存文件文本并绑定当前项目"], ["拆分检索主题", `${workflowPlan.searchQueries.length} 组互补主题并行检索`], ["合并去重", "按标题归一化并去除重复论文"], ["初筛候选", "保留高相关度论文，等待用户确认入库"]]);
     try {
       setWorkflowStage("正在导入研发文件…");
+      saveResumeTask(workflowFile?.name || "研发文件", "正在检索论文");
+      advanceTrace(1);
       const documentId = await uploadDocument(workflowFile, workflowText);
       if (!documentId) return;
       setWorkflowDocumentId(documentId);
       setWorkflowStage(`正在搜索 ${workflowPlan.searchQueries.length} 组相关主题…`);
+      advanceTrace(2);
       const searchData = await Promise.all(workflowPlan.searchQueries.slice(0, 4).map((searchQuery) => api<{ papers: Paper[]; warnings?: string[] }>(`/api/papers/search?q=${encodeURIComponent(searchQuery)}&source=all&limit=12`)));
       const merged = searchData.flatMap((result) => result.papers);
+      advanceTrace(3, `收集到 ${merged.length} 条原始结果`);
       const seen = new Set<string>();
       const papers = merged.filter((paper) => { const key = paper.title.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]/g, ""); if (!key || seen.has(key)) return false; seen.add(key); return true; }).slice(0, 24);
       const candidates = papers.slice(0, 12);
       setWorkflowCandidates(candidates);
       setSearchResults(papers);
       setWorkflowStage("");
+      finishTrace(`初筛完成：${papers.length} 篇去重结果，${candidates.length} 篇候选待确认`);
       setChatMessages((messages) => [...messages, { role: "assistant", content: `计划已执行到 Agent 初筛：通过 ${workflowPlan.searchQueries.length} 组主题发现 ${papers.length} 篇去重论文，已保留 ${candidates.length} 篇候选。请确认后，我会审核入库并生成知识产权材料。` }]);
     } catch (error) {
       setWorkflowStage("");
+      finishTrace(error instanceof Error ? error.message : "Workflow 执行失败", true);
       setChatMessages((messages) => [...messages, { role: "assistant", content: error instanceof Error ? error.message : "Workflow 执行失败" }]);
     } finally { setChatBusy(false); }
   }
@@ -420,8 +487,11 @@ export default function App() {
   async function approveAndConvertWorkflow() {
     if (!workflowPlan || !workflowDocumentId || !workflowCandidates.length || chatBusy) return;
     setChatBusy(true);
+    startTrace([["确认入库", "用户确认候选论文进入知识库"], ["论文审核", `逐篇写入审核意见，共 ${workflowCandidates.length} 篇`], ["建立证据链", "绑定研发文件、论文与项目上下文"], ["生成申报材料", "按技术交底书结构生成可复核初稿"], ["完成交付", "保存材料并返回任务结果"]]);
     try {
       setWorkflowStage("正在审核并入库候选论文…");
+      saveResumeTask(workflowFile?.name || "研发文件", "正在审核论文并生成材料");
+      advanceTrace(1);
       const paperRefs: string[] = [];
       for (const paper of workflowCandidates) {
         const imported = await api<{ id: number }>("/api/papers/import", { method: "POST", body: JSON.stringify(paper) });
@@ -431,11 +501,13 @@ export default function App() {
         }
       }
       const refs = [`document:${workflowDocumentId}`, ...paperRefs];
+      advanceTrace(2, `已建立 ${refs.length} 条来源引用`);
       const title = workflowFile?.name.replace(/\.(pdf|docx)$/i, "") || "研发成果知识产权材料";
       setSelectedSources(refs);
       setDraftTitle(title);
       setView("ip");
       setWorkflowStage("正在生成知识产权申报材料…");
+      advanceTrace(3);
       await generateDraft(refs, title);
       await refresh();
       setWorkflowPlan(null);
@@ -444,9 +516,12 @@ export default function App() {
       setWorkflowCandidates([]);
       setWorkflowDocumentId(null);
       setWorkflowStage("");
+      clearResumeTask();
+      finishTrace("研发文件、论文和知识产权材料已完成闭环");
       setChatMessages((messages) => [...messages, { role: "assistant", content: "Workflow 已完成：研发文件已入库，候选论文已审核入库，知识产权申报材料初稿已生成。" }]);
     } catch (error) {
       setWorkflowStage("");
+      finishTrace(error instanceof Error ? error.message : "审核转化失败", true);
       setChatMessages((messages) => [...messages, { role: "assistant", content: error instanceof Error ? error.message : "审核转化失败" }]);
     } finally { setChatBusy(false); }
   }
@@ -497,12 +572,15 @@ export default function App() {
     if (IS_LOCAL_DEMO && modelChoice !== "k3") return notify("本地页面目前只支持 K3；公网 Demo 可选择 GLM-5.3 或 Workers AI");
     setLoading(true);
     setActiveDraft(null);
+    if (!reasoningTrace.some((step) => step.status === "active")) startTrace([["读取资料", `读取 ${sourceRefs.length} 份已入库资料`], ["提炼创新点", "识别技术问题、技术方案和可保护特征"], ["组织材料", "按技术交底书结构组织章节和权利要求建议"], ["质量校验", "标记待补充信息，检查证据与结论边界"]]);
     setGenerationStep("正在读取已入库资料…");
     const stepTimer = window.setInterval(() => setGenerationStep((current) => current === "正在读取已入库资料…" ? "正在提炼创新点与技术方案…" : current === "正在提炼创新点与技术方案…" ? "正在组织权利要求结构…" : "正在校验格式与待确认事项…"), 1100);
     try {
       if (IS_LOCAL_DEMO) {
         if (!k3Ready) throw new Error("K3 本地服务未启动，请先运行 npm run k3");
+        advanceTrace(1);
         const context = await api<{ sourceText: string }>("/api/source-context", { method: "POST", body: JSON.stringify({ sources: sourceRefs }) });
+        advanceTrace(2, `已读取 ${context.sourceText.length.toLocaleString()} 个字符的证据`);
         const response = await fetch(`${K3_LOCAL_BASE}/generate`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -513,14 +591,19 @@ export default function App() {
         const localDraft = { ...(localData.draft as Draft), groupName: draftGroup };
         setActiveDraft(localDraft);
         setDrafts((current) => [localDraft, ...current]);
+        finishTrace("材料初稿已生成，可进入人工复核");
         notify("K3 已生成知识产权材料初稿");
         return;
       }
+      advanceTrace(1);
       const data = await api<{ draft: Draft }>("/api/ip-drafts", { method: "POST", body: JSON.stringify({ title: materialTitle, sources: sourceRefs, groupName: draftGroup, model: modelChoice, speed: speedChoice }) });
+      advanceTrace(2, `已生成 ${data.draft.title}`);
       setActiveDraft(data.draft);
+      finishTrace("材料初稿已生成，可进入人工复核");
       notify("知识产权材料初稿已生成");
       await refresh();
     } catch (error) {
+      finishTrace(error instanceof Error ? error.message : "生成失败", true);
       notify(error instanceof Error ? error.message : "生成失败");
     } finally {
       window.clearInterval(stepTimer);
@@ -633,8 +716,9 @@ export default function App() {
 
         {layoutMode === "dashboard" && view === "review" && (
           <section className="workspace">
-            <div className="workspace-head"><div><p className="eyebrow">HUMAN IN THE LOOP</p><h2>审核后入库</h2><p>保留人工判断，确保知识来源可靠、方向相关、证据可追溯。</p></div><span className="source-pill">{pendingPapers.length} 项待处理</span></div>
-            <div className="review-grid">{pendingPapers.length ? pendingPapers.map((paper) => <article className="review-card" key={paper.id}><div className="review-top"><span>{sourceLabel(paper.source)}</span><small>{formatDate(paper.publishedAt)}</small></div><h3>{paper.title}</h3><p>{paper.abstract || "暂无摘要"}</p><div className="review-actions"><button className="ghost danger" onClick={() => void reviewPaper(paper.id!, "rejected")}>驳回</button><button className="primary" onClick={() => void reviewPaper(paper.id!, "approved")}>通过并入库</button></div></article>) : <EmptyState title="待审核任务已处理完毕" detail="从论文雷达加入的新论文会出现在这里。" />}</div>
+            <div className="workspace-head"><div><p className="eyebrow">HUMAN IN THE LOOP</p><h2>审核后入库</h2><p>保留人工判断，确保知识来源可靠、方向相关、证据可追溯。</p></div><div className="review-summary"><span>{pendingPapers.length} 项待处理</span><label><input type="checkbox" checked={pendingPapers.length > 0 && selectedReviewIds.length === pendingPapers.length} onChange={(event) => setSelectedReviewIds(event.target.checked ? pendingPapers.map((paper) => paper.id!).filter(Boolean) : [])} />全选</label></div></div>
+            {selectedReviewIds.length ? <div className="batch-toolbar"><strong>已选择 {selectedReviewIds.length} 篇</strong><button className="primary" disabled={loading} onClick={() => void batchReview("approved")}>批量通过并入库</button><button className="ghost danger" disabled={loading} onClick={() => void batchReview("rejected")}>批量驳回</button><button className="ghost" onClick={() => setSelectedReviewIds([])}>取消选择</button></div> : null}
+            <div className="review-grid">{pendingPapers.length ? pendingPapers.map((paper) => <article className={`review-card${selectedReviewIds.includes(paper.id!) ? " selected" : ""}`} key={paper.id}><div className="review-top"><label className="review-check"><input type="checkbox" checked={selectedReviewIds.includes(paper.id!)} onChange={(event) => setSelectedReviewIds((ids) => event.target.checked ? [...ids, paper.id!] : ids.filter((id) => id !== paper.id))} />选择</label><span>{sourceLabel(paper.source)}</span><small>{formatDate(paper.publishedAt)}</small></div><h3>{paper.title}</h3><p>{paper.abstract || "暂无摘要"}</p><div className="review-actions"><button className="ghost danger" onClick={() => void reviewPaper(paper.id!, "rejected")}>驳回</button><button className="primary" onClick={() => void reviewPaper(paper.id!, "approved")}>通过并入库</button></div></article>) : <EmptyState title="待审核任务已处理完毕" detail="从论文雷达加入的新论文会出现在这里。" />}</div>
           </section>
         )}
 
@@ -664,7 +748,7 @@ export default function App() {
         {layoutMode === "agent" && (
           <section className="agent-workspace">
             <div className="agent-chat-column">
-              <div className="agent-welcome"><p className="eyebrow">RESEARCH OPERATING SYSTEM</p><h2>你好，我是研知 Agent</h2><p>从一份研发文件、一组论文或一个问题开始，我会帮你规划任务、调用技能并沉淀成果。</p><div className="agent-quick-grid">{["上传研发文件并制定 Plan", "搜索当前技术方向论文", "分析研发文件中的创新点", "生成发明专利技术交底书"].map((prompt) => <button key={prompt} onClick={() => prompt.startsWith("上传") ? chatFileRef.current?.click() : void sendChat(prompt)}><span>✦</span>{prompt}<b>→</b></button>)}</div></div>
+              <div className="agent-welcome"><p className="eyebrow">RESEARCH OPERATING SYSTEM</p><h2>你好，我是研知 Agent</h2><p>从一份研发文件、一组论文或一个问题开始，我会帮你规划任务、调用技能并沉淀成果。</p>{resumeTask ? <div className="resume-banner"><span>↻</span><div><strong>发现上次未完成任务</strong><small>{resumeTask.fileName} · {resumeTask.stage}</small></div><button onClick={() => chatFileRef.current?.click()}>重新导入继续</button></div> : null}<div className="agent-quick-grid">{["上传研发文件并制定 Plan", "搜索当前技术方向论文", "分析研发文件中的创新点", "生成发明专利技术交底书"].map((prompt) => <button key={prompt} onClick={() => prompt.startsWith("上传") ? chatFileRef.current?.click() : void sendChat(prompt)}><span>✦</span>{prompt}<b>→</b></button>)}</div></div>
               <div className="agent-message-list">{chatMessages.length ? chatMessages.map((item, index) => <div className={`chat-bubble ${item.role}`} key={`${item.role}-${index}`}><p>{item.content}</p>{item.model ? <small>{item.model}</small> : null}</div>) : <div className="agent-empty-hint"><span>⌁</span><strong>从对话开始你的研发任务</strong><p>你可以直接上传 PDF / DOCX，或告诉我你想查找的技术方向。</p></div>}{workflowStage ? <div className="workflow-status">{workflowStage}</div> : null}{workflowPlan ? <div className="workflow-card agent-plan-card"><div className="agent-card-title"><strong>Agent 执行计划</strong><span>{workflowPlan.model || "自动模型"}</span></div><p>{workflowPlan.summary}</p><small>检索主题：{workflowPlan.searchQueries.join("；")}</small><ul>{workflowPlan.steps.map((step) => <li key={step}>{step}</li>)}</ul>{workflowPlan.evidenceMap.slice(0, 2).map((item) => <div className="evidence-map" key={item.evidence}><b>研发证据：</b>{item.evidence}<br/><b>论文方向：</b>{item.researchDirection}<br/><b>转化价值：</b>{item.ipValue}</div>)}{!workflowCandidates.length ? <div className="workflow-actions"><button className="primary" disabled={chatBusy} onClick={() => void confirmFileWorkflow()}>确认 Plan，开始执行</button><button className="ghost" onClick={() => { setWorkflowPlan(null); setWorkflowFile(null); setWorkflowText(""); }}>取消</button></div> : <div className="workflow-result">已发现 {workflowCandidates.length} 篇候选论文，等待确认入库。</div>}</div> : null}{chatBusy ? <div className="chat-bubble assistant typing">Agent 正在调用 Skill 并整理结果…</div> : null}</div>
               <div className="agent-composer"><div className="composer-tools"><input ref={chatFileRef} hidden type="file" accept=".pdf,.docx" onChange={(event) => void runFileWorkflow(event.target.files?.[0])} /><button className="chat-upload" disabled={chatBusy} onClick={() => chatFileRef.current?.click()}>＋ 文件</button><select value={modelChoice} onChange={(event) => setModelChoice(event.target.value as ModelChoice)}><option value="auto">自动模型</option><option value="glm-5.3">GLM-5.3</option><option value="qwen3">Qwen3</option>{IS_LOCAL_DEMO ? <option value="k3">K3</option> : null}</select><select value={speedChoice} onChange={(event) => setSpeedChoice(event.target.value as SpeedChoice)}><option value="fast">快速</option><option value="balanced">均衡</option><option value="deep">深度</option></select></div><div className="composer-input"><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder="描述你的研发任务，或询问当前项目…" rows={3} /><button className="primary" disabled={chatBusy || !chatInput.trim()} onClick={() => void sendChat()}>发送 ↑</button></div><small>Agent 会在执行关键动作前征求确认，重要结果均可追溯。</small></div>
             </div>
@@ -672,6 +756,7 @@ export default function App() {
               <div className="context-section"><div className="context-title"><span>当前项目</span><button onClick={renameProject}>编辑</button></div><strong>{activeProject?.name || "默认研发项目"}</strong><p>{activeProject?.description || "尚未填写项目说明"}</p></div>
               <div className="context-section"><div className="context-title"><span>执行计划</span><b>{workflowStage || (workflowPlan ? "待确认" : "等待输入")}</b></div><div className="mini-timeline"><div className="mini-step active"><i>1</i><span>理解任务</span></div><div className={`mini-step ${workflowPlan ? "active" : ""}`}><i>2</i><span>制定 Plan</span></div><div className={`mini-step ${searchResults.length ? "active" : ""}`}><i>3</i><span>检索与审核</span></div><div className={`mini-step ${activeDraft ? "active" : ""}`}><i>4</i><span>沉淀成果</span></div></div></div>
               <div className="context-section"><div className="context-title"><span>Skill 调用</span><button onClick={() => notify("Skill 配置将在下一版开放")}>管理</button></div><div className="skill-list">{agentSkills.map(([name, status, state]) => <div className="skill-row" key={name}><i className={state}>{state === "done" ? "✓" : state === "current" ? "·" : "○"}</i><span>{name}</span><small>{status}</small></div>)}</div></div>
+              <div className="context-section reasoning-section"><div className="context-title"><span>AI 分析步骤</span><b>{reasoningTrace.some((step) => step.status === "active") ? "进行中" : "可追溯"}</b></div><ReasoningTrace steps={reasoningTrace} /></div>
               <div className="context-section"><div className="context-title"><span>证据链</span><b>{workflowPlan?.evidenceMap.length || 0} 条</b></div>{workflowPlan?.evidenceMap.length ? workflowPlan.evidenceMap.slice(0, 2).map((item) => <div className="context-evidence" key={item.evidence}><strong>{item.evidence}</strong><span>→ {item.researchDirection}</span></div>) : <p className="context-empty">上传研发文件或选中论文后，Agent 会在这里展示证据关联。</p>}</div>
               <div className="context-section"><div className="context-title"><span>任务产物</span><button onClick={() => { setLayoutMode("dashboard"); setView("library"); }}>查看资源库</button></div><div className="artifact-list">{workflowFile ? <button onClick={() => notify(`当前文件：${workflowFile.name}`)}><i>PDF</i><span>{workflowFile.name}<small>研发文件</small></span></button> : null}{workflowCandidates.length ? <button onClick={() => { setLayoutMode("dashboard"); setView("discover"); }}><i>论文</i><span>{workflowCandidates.length} 篇候选论文<small>Agent 初筛结果</small></span></button> : null}{activeDraft ? <button onClick={() => { setLayoutMode("dashboard"); setView("ip"); }}><i>IP</i><span>{activeDraft.title}<small>知识产权材料</small></span></button> : null}{!workflowFile && !workflowCandidates.length && !activeDraft ? <p className="context-empty">完成任务后，文件、论文和材料会出现在这里。</p> : null}</div></div>
             </aside>
@@ -683,7 +768,7 @@ export default function App() {
         <div className="assistant-panel-head"><div><p className="eyebrow">AI COPILOT</p><strong>研知 Agent</strong><small>当前页面：{pageTitle} · {activeProject?.name || "默认项目"}</small></div><div className="chat-window-actions"><button title={chatMinimized ? "展开 AI 面板" : "折叠 AI 面板"} onClick={toggleChatMinimized}>{chatMinimized ? "‹" : "›"}</button><button title="关闭 AI 面板" onClick={() => setChatOpen(false)}>×</button></div></div>
         {!chatMinimized ? <>
           <div className="assistant-context"><span>当前上下文</span><strong>{view === "discover" ? `论文检索结果 ${searchResults.length} 篇` : view === "library" ? `资源库 ${approvedPapers.length + documents.length} 项` : view === "ip" ? "成果材料工作区" : "研发知识工作台"}</strong><small>Agent 会根据当前页面和项目状态给出建议</small></div>
-          <div className="assistant-quick"><span>快捷操作</span><div>{quickPrompts.map((prompt) => <button key={prompt} disabled={chatBusy} onClick={() => void sendChat(prompt)}>✦ {prompt}</button>)}</div></div>
+          <div className="assistant-quick"><span>快捷操作</span><div>{quickPrompts.map((prompt) => <button key={prompt} disabled={chatBusy} onClick={() => void sendChat(prompt)}>✦ {prompt}</button>)}</div></div><div className="assistant-trace"><div className="assistant-trace-title"><span>AI 分析步骤</span><small>展示依据摘要，不展示隐式原始思维链</small></div><ReasoningTrace steps={reasoningTrace} compact /></div>
           <div className="chat-body">{chatMessages.length ? chatMessages.map((item, index) => <div className={`chat-bubble ${item.role}`} key={`${item.role}-${index}`}><p>{item.content}</p>{item.model ? <small>{item.model}</small> : null}</div>) : <div className="chat-welcome"><strong>你好，我是研知 Agent</strong><p>我会围绕当前页面协助你搜索论文、查看研发文件、审核知识和生成成果材料。</p><div className="welcome-hint">试试说：“帮我分析当前页面”</div></div>}{workflowStage ? <div className="workflow-status">{workflowStage}</div> : null}{workflowPlan ? <div className="workflow-card"><strong>Workflow Plan</strong><p>{workflowPlan.summary}</p><small>检索主题：{workflowPlan.searchQueries.join("；")}</small><ul>{workflowPlan.steps.map((step) => <li key={step}>{step}</li>)}</ul><small>分析摘要：{workflowPlan.analysisSummary.join("；")}</small><small>筛选标准：{workflowPlan.screeningCriteria.join("；")}</small>{workflowPlan.evidenceMap.slice(0, 3).map((item) => <div className="evidence-map" key={item.evidence}><b>研发证据：</b>{item.evidence}<br/><b>论文方向：</b>{item.researchDirection}<br/><b>转化价值：</b>{item.ipValue}</div>)}{!workflowCandidates.length ? <div className="workflow-actions"><button className="primary" disabled={chatBusy} onClick={() => void confirmFileWorkflow()}>确认 Plan，开始执行</button><button className="ghost" onClick={() => { setWorkflowPlan(null); setWorkflowFile(null); setWorkflowText(""); }}>取消</button></div> : <><p className="workflow-result">Agent 初筛保留 {workflowCandidates.length} 篇候选论文。</p><div className="workflow-actions"><button className="primary" disabled={chatBusy} onClick={() => void approveAndConvertWorkflow()}>确认入库并完成转化</button><button className="ghost" onClick={() => setWorkflowCandidates([])}>重新确认</button></div></>}</div> : null}{chatBusy ? <div className="chat-bubble assistant typing">Agent 正在处理文件或整理建议…</div> : null}</div>
           <div className="chat-compose"><input ref={chatFileRef} hidden type="file" accept=".pdf,.docx" onChange={(event) => void runFileWorkflow(event.target.files?.[0])} /><button className="chat-upload" disabled={chatBusy} onClick={() => chatFileRef.current?.click()}>导入文件</button><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder="询问当前页面的内容…" rows={2} /><button className="primary" disabled={chatBusy || !chatInput.trim()} onClick={() => void sendChat()}>发送</button></div>
         </> : <button className="assistant-minimized-label" onClick={toggleChatMinimized}>展开 AI 助手</button>}
@@ -703,4 +788,9 @@ function PaperRow({ paper, onPreview }: { paper: Paper; onPreview?: () => void }
 
 function EmptyState({ title, detail }: { title: string; detail: string }) {
   return <div className="empty"><i>◇</i><strong>{title}</strong><p>{detail}</p></div>;
+}
+
+function ReasoningTrace({ steps, compact = false }: { steps: TraceStep[]; compact?: boolean }) {
+  if (!steps.length) return <p className="trace-empty">执行任务后，这里会显示 Agent 的分析依据和决策步骤。</p>;
+  return <div className={`reasoning-trace${compact ? " compact" : ""}`}>{steps.map((step, index) => <div className={`trace-step ${step.status}`} key={`${step.label}-${index}`}><i>{step.status === "done" ? "✓" : step.status === "error" ? "!" : step.status === "active" ? "·" : index + 1}</i><div><strong>{step.label}</strong><small>{step.detail}</small></div></div>)}</div>;
 }
