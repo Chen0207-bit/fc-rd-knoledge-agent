@@ -448,7 +448,7 @@ export default function App() {
         {view === "dashboard" && (
           <>
             <section className="hero">
-              <div><span className="hero-label">当前项目 · {activeProject?.name || "默认研发项目"}</span><h2>把分散的研究，<br/>变成可沉淀的创新资产。</h2><p>{activeProject?.description || "自动发现论文、审核入库，再从研发资料生成知识产权材料初稿。"}</p><div className="hero-actions"><button className="primary" onClick={() => setView("discover")}>启动论文采集 <span>→</span></button><button className="chat-launch" onClick={() => setChatOpen(true)}>与 Agent 对话 <span>⌁</span></button></div></div>
+              <div><span className="hero-label">当前项目 · {activeProject?.name || "默认研发项目"} <button className="project-inline-add" onClick={() => setProjectModalOpen(true)}>＋新增项目</button></span><h2>把分散的研究，<br/>变成可沉淀的创新资产。</h2><p>{activeProject?.description || "自动发现论文、审核入库，再从研发资料生成知识产权材料初稿。"}</p><div className="hero-actions"><button className="primary" onClick={() => setView("discover")}>启动论文采集 <span>→</span></button><button className="chat-launch" onClick={() => setChatOpen(true)}>与 Agent 对话 <span>⌁</span></button></div></div>
               <div className="flow-card">
                 <div className="flow-head"><span>研发知识闭环</span><b>真实流程</b></div>
                 {flowSteps.map(([n,t,d,s])=><div className={`flow-row ${s}`} key={n}><i>{s==="done"?"✓":n}</i><div><strong>{t}</strong><span>{d}</span></div><b>{s==="current"?"进行中":s==="done"?"已完成":"待开始"}</b></div>)}
