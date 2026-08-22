@@ -104,12 +104,15 @@ export default function App() {
   const [customGroups, setCustomGroups] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem("rd-custom-groups") || "[]") as string[]; } catch { return []; } });
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMinimized, setChatMinimized] = useState(false);
+  const [chatPosition, setChatPosition] = useState<{ left: number; top: number } | null>(null);
+  const [chatDragging, setChatDragging] = useState<{ offsetX: number; offsetY: number } | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => { try { return JSON.parse(sessionStorage.getItem("rd-agent-chat") || "[]") as ChatMessage[]; } catch { return []; } });
   const [activeDraft, setActiveDraft] = useState<Draft | null>(null);
   const [k3Ready, setK3Ready] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const chatWindowRef = useRef<HTMLElement>(null);
 
   const api = useCallback(async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
     const target = new URL(`${API_BASE}${path}`);
@@ -159,6 +162,22 @@ export default function App() {
   useEffect(() => { localStorage.setItem("rd-custom-groups", JSON.stringify(customGroups)); }, [customGroups]);
   useEffect(() => { localStorage.setItem("rd-active-project", String(activeProjectId)); }, [activeProjectId]);
   useEffect(() => { sessionStorage.setItem("rd-agent-chat", JSON.stringify(chatMessages.slice(-20))); }, [chatMessages]);
+
+  useEffect(() => {
+    if (!chatDragging) return;
+    const move = (event: PointerEvent) => {
+      const width = chatWindowRef.current?.getBoundingClientRect().width || 390;
+      const height = chatWindowRef.current?.getBoundingClientRect().height || 210;
+      setChatPosition({
+        left: Math.max(8, Math.min(window.innerWidth - width - 8, event.clientX - chatDragging.offsetX)),
+        top: Math.max(8, Math.min(window.innerHeight - height - 8, event.clientY - chatDragging.offsetY)),
+      });
+    };
+    const stop = () => setChatDragging(null);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop, { once: true });
+    return () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); };
+  }, [chatDragging]);
 
   useEffect(() => {
     if (!IS_LOCAL_DEMO) return;
@@ -319,6 +338,15 @@ export default function App() {
       setChatMessages((messages) => [...messages, { role: "assistant", content: data.reply, model: data.model }]);
     } catch (error) { notify(error instanceof Error ? error.message : "Agent 对话失败"); }
     finally { setChatBusy(false); }
+  }
+
+  function startChatDrag(event: React.PointerEvent<HTMLElement>) {
+    if ((event.target as HTMLElement).closest("button")) return;
+    const rect = chatWindowRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setChatPosition({ left: rect.left, top: rect.top });
+    setChatDragging({ offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top });
   }
 
   async function previewDocument(id: number) {
@@ -507,7 +535,7 @@ export default function App() {
         )}
       </main>
 
-      {chatOpen ? <aside className={`chat-window${chatMinimized ? " minimized" : ""}`}><div className="chat-head"><div onClick={() => setChatMinimized((value) => !value)}><p className="eyebrow">RESEARCH COPILOT</p><strong>与研知 Agent 对话</strong><small>{chatMinimized ? "点击恢复对话" : "会话会持续到本次浏览器会话结束"}</small></div><div className="chat-window-actions"><button title={chatMinimized ? "恢复" : "最小化"} onClick={() => setChatMinimized((value) => !value)}>{chatMinimized ? "□" : "—"}</button><button title="关闭" onClick={() => setChatOpen(false)}>×</button></div></div>{!chatMinimized ? <><div className="chat-body">{chatMessages.length ? chatMessages.map((item, index) => <div className={`chat-bubble ${item.role}`} key={`${item.role}-${index}`}><p>{item.content}</p>{item.model ? <small>{item.model}</small> : null}</div>) : <div className="chat-welcome"><strong>先从研究方向开始</strong><p>例如：“我想做工业视觉缺陷检测，帮我拆分检索主题和筛选标准。”</p></div>}{chatBusy ? <div className="chat-bubble assistant typing">Agent 正在整理建议…</div> : null}</div><div className="chat-compose"><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder="讨论论文方向、关键词或转化思路…" rows={2} /><button className="primary" disabled={chatBusy || !chatInput.trim()} onClick={() => void sendChat()}>发送</button></div></> : null}</aside> : null}
+      {chatOpen ? <aside ref={chatWindowRef} style={chatPosition ? { left: chatPosition.left, top: chatPosition.top, right: "auto", bottom: "auto" } : undefined} className={`chat-window${chatMinimized ? " minimized" : ""}`}><div className="chat-head" onPointerDown={startChatDrag}><div onClick={() => setChatMinimized((value) => !value)}><p className="eyebrow">RESEARCH COPILOT</p><strong>与研知 Agent 对话</strong><small>{chatMinimized ? "点击恢复对话 · 可拖动" : "会话会持续到本次浏览器会话结束 · 可拖动"}</small></div><div className="chat-window-actions"><button title={chatMinimized ? "恢复" : "最小化"} onClick={() => setChatMinimized((value) => !value)}>{chatMinimized ? "□" : "—"}</button><button title="关闭" onClick={() => setChatOpen(false)}>×</button></div></div>{!chatMinimized ? <><div className="chat-body">{chatMessages.length ? chatMessages.map((item, index) => <div className={`chat-bubble ${item.role}`} key={`${item.role}-${index}`}><p>{item.content}</p>{item.model ? <small>{item.model}</small> : null}</div>) : <div className="chat-welcome"><strong>先从研究方向开始</strong><p>例如：“我想做工业视觉缺陷检测，帮我拆分检索主题和筛选标准。”</p></div>}{chatBusy ? <div className="chat-bubble assistant typing">Agent 正在整理建议…</div> : null}</div><div className="chat-compose"><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder="讨论论文方向、关键词或转化思路…" rows={2} /><button className="primary" disabled={chatBusy || !chatInput.trim()} onClick={() => void sendChat()}>发送</button></div></> : null}</aside> : null}
       {preview ? <div className="modal-backdrop" onClick={() => setPreview(null)}><div className="preview-modal" onClick={(event) => event.stopPropagation()}><div className="preview-head"><div><p className="eyebrow">ONLINE PREVIEW</p><h2>{preview.title}</h2></div><button className="ghost" onClick={() => setPreview(null)}>关闭</button></div>{preview.kind === "paper" && preview.url ? <a href={preview.url} target="_blank" rel="noreferrer">打开原文 ↗</a> : null}<pre>{preview.content}</pre></div></div> : null}
       {projectModalOpen ? <div className="modal-backdrop" onClick={() => setProjectModalOpen(false)}><div className="project-modal" onClick={(event) => event.stopPropagation()}><p className="eyebrow">NEW PROJECT</p><h2>新增研发项目</h2><p>项目之间的论文、研发文件、审核任务和申报材料相互隔离。</p><label>项目名称<input autoFocus value={projectForm.name} onChange={(event) => setProjectForm((form) => ({ ...form, name: event.target.value }))} placeholder="例如：工业视觉缺陷检测" /></label><label>项目介绍<textarea value={projectForm.description} onChange={(event) => setProjectForm((form) => ({ ...form, description: event.target.value }))} placeholder="描述研发目标、范围或负责人关注点" rows={4} /></label><div className="project-modal-actions"><button className="ghost" onClick={() => setProjectModalOpen(false)}>取消</button><button className="primary" onClick={() => void saveProject()}>创建并进入</button></div></div></div> : null}
       {!accessCode || codeInput ? <div className="modal-backdrop"><div className="access-modal"><span className="seal">研</span><p className="eyebrow">SECURE DEMO</p><h2>进入研知 Agent</h2><p>请输入演示访问码。它只保存在当前浏览器会话中，用于保护 AI 调用额度。</p><input autoFocus value={codeInput} onChange={(event) => { setCodeInput(event.target.value); setAuthError(""); }} onKeyDown={(event) => event.key === "Enter" && void unlock()} placeholder="演示访问码" type="password" />{authError ? <div className="form-error">{authError}</div> : null}<button className="primary" disabled={loading} onClick={() => void unlock()}>{loading ? "正在验证…" : "进入工作台"}</button>{accessCode ? <button className="text-button" onClick={() => setCodeInput("")}>取消</button> : null}</div></div> : null}
