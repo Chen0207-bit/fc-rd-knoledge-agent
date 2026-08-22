@@ -774,7 +774,7 @@ export default function App() {
     drafts.length ? { key: "draft", label: "最近生成材料", detail: `${drafts[0]?.title || "知识产权材料"} · ${stageLabel(draftStages[drafts[0]?.id] || "ai_draft")}`, action: "查看材料" } : null,
   ].filter(Boolean) as Array<{ key: string; label: string; detail: string; action: string }>, [draftStages, drafts, pendingPapers, resumeTask, workflowPlan]);
 
-  const pageTitle = ({ dashboard: "AI 工作台", discover: "论文雷达", review: "审核中心", library: "资源库", ip: "成果材料" } as Record<View, string>)[view];
+  const pageTitle = view === "dashboard" ? (aiFocus ? "AI 工作台" : "任务中心") : ({ discover: "论文雷达", review: "审核中心", library: "资源库", ip: "成果材料" } as Record<Exclude<View, "dashboard">, string>)[view];
   const quickPrompts = view === "discover"
     ? ["分析当前论文结果", "筛选最相关的 10 篇", "找出与当前研发方向最接近的论文"]
     : view === "library"
@@ -793,13 +793,14 @@ export default function App() {
       <aside className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`}>
         <div className="brand"><span>研</span><div><strong>研知 Agent</strong><small>R&D Intelligence</small></div><button className="sidebar-collapse" onClick={() => setSidebarCollapsed((value) => !value)} title={sidebarCollapsed ? "展开导航" : "折叠导航"}>{sidebarCollapsed ? "›" : "‹"}</button></div>
         <nav>
-          {[ 
+          {[
+            ["home", "⌂", "任务中心"],
             ["dashboard", "✦", "AI 工作台"],
             ["discover", "⌕", "论文雷达"],
             ["library", "▤", "资源库"],
             ["ip", "◇", "成果材料"],
           ].map(([key, icon, label]) => (
-            <button className={view === key && (key !== "dashboard" || aiFocus) ? "active" : ""} key={key} onClick={() => { const nextView = key as View; setView(nextView); setAIFocus(nextView === "dashboard"); setChatOpen(false); setChatMinimized(false); }}>
+            <button className={(key === "home" ? view === "dashboard" && !aiFocus : key === "dashboard" ? aiFocus : view === key) ? "active" : ""} key={key} onClick={() => { if (key === "home") { setView("dashboard"); setAIFocus(false); } else if (key === "dashboard") { setView("dashboard"); setAIFocus(true); } else { setView(key as View); setAIFocus(false); } setChatOpen(false); setChatMinimized(false); }}>
               <b>{icon}</b><span>{label}</span>{key === "library" && pendingPapers.length > 0 ? <em>{pendingPapers.length}</em> : null}
             </button>
           ))}
