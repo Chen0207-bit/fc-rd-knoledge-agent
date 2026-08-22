@@ -7,6 +7,10 @@ pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 type View = "dashboard" | "discover" | "review" | "library" | "ip";
 type LayoutMode = "dashboard" | "agent";
+type UIPreset = "classic" | "cloudflare" | "gpt";
+type ThemePreference = "system" | "light" | "dark";
+type AIProvider = "glm" | "openai-compatible" | "k3";
+type AIConfig = { enabled: boolean; provider: AIProvider; endpoint: string; apiKey: string; model: string; remember: boolean };
 type PaperStatus = "pending" | "approved" | "rejected";
 const GROUPS = ["未分类", "算法研究", "产品技术", "专利候选", "竞品情报"];
 try { GROUPS.push(...(JSON.parse(localStorage.getItem("rd-custom-groups") || "[]") as string[]).filter((group) => !GROUPS.includes(group))); } catch { /* first visit */ }
@@ -33,6 +37,14 @@ type Paper = {
 type DocumentItem = { id: number; name: string; mimeType: string; size: number; textPreview?: string; text?: string; createdAt: string; groupName?: string };
 type Draft = { id: number; title: string; sourceRefs: string; markdown: string; model: string; groupName?: string; createdAt: string };
 type Stats = { discovered: number; pending: number; approved: number; documents: number; drafts: number };
+
+const DEFAULT_AI_CONFIG: AIConfig = { enabled: false, provider: "glm", endpoint: "https://open.bigmodel.cn/api/paas/v4", apiKey: "", model: "glm-5.3", remember: false };
+function readAIConfig(): AIConfig {
+  try {
+    const raw = sessionStorage.getItem("rd-ai-config") || localStorage.getItem("rd-ai-config");
+    return raw ? { ...DEFAULT_AI_CONFIG, ...(JSON.parse(raw) as Partial<AIConfig>) } : DEFAULT_AI_CONFIG;
+  } catch { return DEFAULT_AI_CONFIG; }
+}
 
 const API_BASE = (
   import.meta.env.VITE_API_BASE_URL ||
@@ -78,6 +90,10 @@ async function extractFile(file: File) {
 export default function App() {
   const [view, setView] = useState<View>("dashboard");
   const [layoutMode, setLayoutMode] = useState<LayoutMode>(() => (localStorage.getItem("rd-layout-mode") as LayoutMode) || "dashboard");
+  const [uiPreset, setUiPreset] = useState<UIPreset>(() => (localStorage.getItem("rd-ui-preset") as UIPreset) || "cloudflare");
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => (localStorage.getItem("rd-theme-preference") as ThemePreference) || "system");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [aiConfig, setAIConfig] = useState<AIConfig>(readAIConfig);
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState(() => Number(localStorage.getItem("rd-active-project") || 1));
   const [projectModalOpen, setProjectModalOpen] = useState(false);
@@ -127,7 +143,7 @@ export default function App() {
     target.searchParams.set("project_id", String(activeProjectId));
     const response = await fetch(target.toString(), {
       ...options,
-      headers: { "content-type": "application/json", ...(accessCode ? { "x-demo-code": accessCode } : {}), ...(options.headers || {}) },
+      headers: { "content-type": "application/json", ...(accessCode ? { "x-demo-code": accessCode } : {}), ...(aiConfig.enabled && aiConfig.apiKey ? { "x-user-ai-provider": aiConfig.provider, "x-user-ai-endpoint": aiConfig.endpoint, "x-user-ai-key": aiConfig.apiKey, "x-user-ai-model": aiConfig.model } : {}), ...(options.headers || {}) },
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -136,7 +152,7 @@ export default function App() {
       throw error;
     }
     return payload as T;
-  }, [accessCode, activeProjectId]);
+  }, [accessCode, activeProjectId, aiConfig]);
 
   const refresh = useCallback(async () => {
     if (!accessCode) return;
@@ -171,6 +187,8 @@ export default function App() {
   useEffect(() => { localStorage.setItem("rd-active-project", String(activeProjectId)); }, [activeProjectId]);
   useEffect(() => { localStorage.setItem("rd-sidebar-collapsed", sidebarCollapsed ? "1" : "0"); }, [sidebarCollapsed]);
   useEffect(() => { localStorage.setItem("rd-layout-mode", layoutMode); }, [layoutMode]);
+  useEffect(() => { localStorage.setItem("rd-ui-preset", uiPreset); }, [uiPreset]);
+  useEffect(() => { localStorage.setItem("rd-theme-preference", themePreference); }, [themePreference]);
   useEffect(() => { sessionStorage.setItem("rd-agent-chat", JSON.stringify(chatMessages.slice(-20))); }, [chatMessages]);
 
   useEffect(() => {
@@ -182,6 +200,24 @@ export default function App() {
     setMessage(text);
     window.setTimeout(() => setMessage(""), 3200);
   };
+
+  function saveAISettings() {
+    const next = { ...aiConfig, endpoint: aiConfig.endpoint.trim().replace(/\/$/, ""), model: aiConfig.model.trim() || "glm-5.3" };
+    setAIConfig(next);
+    sessionStorage.setItem("rd-ai-config", JSON.stringify(next));
+    if (next.remember) localStorage.setItem("rd-ai-config", JSON.stringify(next));
+    else localStorage.removeItem("rd-ai-config");
+    setSettingsOpen(false);
+    notify(next.enabled ? "自定义模型配置已启用" : "已保存，当前继续使用平台默认模型");
+  }
+
+  function choosePreset(preset: UIPreset) {
+    setUiPreset(preset);
+    if (preset === "gpt") setLayoutMode("agent");
+    if (preset === "cloudflare") setLayoutMode("dashboard");
+    setChatOpen(false);
+    setChatMinimized(false);
+  }
 
   function switchProject(projectId: number) {
     setActiveProjectId(projectId);
@@ -540,7 +576,7 @@ export default function App() {
   const agentContextTitle = view === "discover" ? "论文检索任务" : view === "library" ? "研发知识库" : view === "ip" ? "知识产权材料" : "研发知识闭环";
 
   return (
-    <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${chatOpen ? " assistant-open" : ""}${chatOpen && chatMinimized ? " assistant-minimized" : ""}`}>
+    <div className={`app-shell preset-${uiPreset} theme-${themePreference}${sidebarCollapsed ? " sidebar-collapsed" : ""}${chatOpen ? " assistant-open" : ""}${chatOpen && chatMinimized ? " assistant-minimized" : ""}`}>
       <aside className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`}>
         <div className="brand"><span>研</span><div><strong>研知 Agent</strong><small>R&D Intelligence</small></div><button className="sidebar-collapse" onClick={() => setSidebarCollapsed((value) => !value)} title={sidebarCollapsed ? "展开导航" : "折叠导航"}>{sidebarCollapsed ? "›" : "‹"}</button></div>
         <nav>
@@ -555,7 +591,7 @@ export default function App() {
             </button>
           ))}
         </nav>
-        {!sidebarCollapsed ? <div className="sidebar-note"><b>AI COPILOT</b><p>在论文、文件和成果材料页面，随时打开右侧 Agent。</p></div> : null}
+        <div className="sidebar-bottom"><button className="settings-launch" onClick={() => setSettingsOpen(true)}><span>⚙</span><em>设置</em></button>{!sidebarCollapsed ? <div className="sidebar-note"><b>AI COPILOT</b><p>在论文、文件和成果材料页面，随时打开右侧 Agent。</p></div> : null}</div>
       </aside>
       <main>
         <header>
@@ -653,6 +689,7 @@ export default function App() {
         </> : <button className="assistant-minimized-label" onClick={toggleChatMinimized}>展开 AI 助手</button>}
       </aside> : null}
       {preview ? <div className="modal-backdrop" onClick={() => setPreview(null)}><div className="preview-modal" onClick={(event) => event.stopPropagation()}><div className="preview-head"><div><p className="eyebrow">ONLINE PREVIEW</p><h2>{preview.title}</h2></div><button className="ghost" onClick={() => setPreview(null)}>关闭</button></div>{preview.kind === "paper" && preview.url ? <a href={preview.url} target="_blank" rel="noreferrer">打开原文 ↗</a> : null}<pre>{preview.content}</pre></div></div> : null}
+      {settingsOpen ? <div className="settings-backdrop" onClick={() => setSettingsOpen(false)}><section className="settings-modal" onClick={(event) => event.stopPropagation()}><div className="settings-head"><div><p className="eyebrow">WORKSPACE SETTINGS</p><h2>工作台设置</h2><p>切换界面风格、主题和 Agent 接入方式。</p></div><button className="settings-close" onClick={() => setSettingsOpen(false)}>×</button></div><div className="settings-content"><section className="settings-section"><h3>界面风格</h3><div className="preset-grid"><button className={uiPreset === "classic" ? "selected" : ""} onClick={() => choosePreset("classic")}><span className="preset-preview classic-preview"><i></i><b></b></span><strong>经典研知</strong><small>原始深绿侧栏与研发后台风格</small></button><button className={uiPreset === "cloudflare" ? "selected" : ""} onClick={() => choosePreset("cloudflare")}><span className="preset-preview cloudflare-preview"><i></i><b></b><em></em></span><strong>Cloudflare 风格</strong><small>白色 Dashboard + 橙色 AI 入口</small></button><button className={uiPreset === "gpt" ? "selected" : ""} onClick={() => choosePreset("gpt")}><span className="preset-preview gpt-preview"><i></i><b></b></span><strong>GPT 工作台</strong><small>中间对话 + 右侧上下文和任务</small></button></div></section><section className="settings-section"><h3>外观主题</h3><div className="theme-options">{([["system", "跟随系统", "自动适配白天/夜晚"], ["light", "浅色模式", "清晰的研发后台界面"], ["dark", "深色模式", "适合夜间长时间使用"]] as Array<[ThemePreference, string, string]>).map(([value, label, detail]) => <button className={themePreference === value ? "selected" : ""} key={value} onClick={() => setThemePreference(value)}><span>{value === "system" ? "◐" : value === "light" ? "☼" : "☾"}</span><strong>{label}</strong><small>{detail}</small></button>)}</div></section><section className="settings-section"><div className="settings-section-title"><div><h3>AI 模型接入</h3><p>可配置自己的 GLM 或 OpenAI 兼容接口。</p></div><label className="switch-row"><input type="checkbox" checked={aiConfig.enabled} onChange={(event) => setAIConfig((config) => ({ ...config, enabled: event.target.checked }))} /><span>启用自定义配置</span></label></div><div className="settings-form"><label>服务类型<select value={aiConfig.provider} onChange={(event) => setAIConfig((config) => ({ ...config, provider: event.target.value as AIProvider }))}><option value="glm">智谱 GLM 官方接口</option><option value="openai-compatible">OpenAI 兼容接口</option><option value="k3">本地 K3 / 自定义接口</option></select></label><label>接口地址<input value={aiConfig.endpoint} onChange={(event) => setAIConfig((config) => ({ ...config, endpoint: event.target.value }))} placeholder="https://open.bigmodel.cn/api/paas/v4" /></label><label>模型名称<input value={aiConfig.model} onChange={(event) => setAIConfig((config) => ({ ...config, model: event.target.value }))} placeholder="glm-5.3" /></label><label>API Key<input type="password" value={aiConfig.apiKey} onChange={(event) => setAIConfig((config) => ({ ...config, apiKey: event.target.value }))} placeholder="输入你自己的 API Key" /></label></div><label className="remember-key"><input type="checkbox" checked={aiConfig.remember} onChange={(event) => setAIConfig((config) => ({ ...config, remember: event.target.checked }))} />在本机浏览器保存配置（不写入代码）</label><p className="settings-security">安全提示：启用后，API Key 会随 AI 请求发送到当前项目 Worker。演示环境建议使用专用低额度 Key，不要填写生产主 Key。</p></section></div><div className="settings-actions"><button className="ghost" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" onClick={saveAISettings}>保存设置</button></div></section></div> : null}
       {projectModalOpen ? <div className="modal-backdrop" onClick={() => setProjectModalOpen(false)}><div className="project-modal" onClick={(event) => event.stopPropagation()}><p className="eyebrow">NEW PROJECT</p><h2>新增研发项目</h2><p>项目之间的论文、研发文件、审核任务和申报材料相互隔离。</p><label>项目名称<input autoFocus value={projectForm.name} onChange={(event) => setProjectForm((form) => ({ ...form, name: event.target.value }))} placeholder="例如：工业视觉缺陷检测" /></label><label>项目介绍<textarea value={projectForm.description} onChange={(event) => setProjectForm((form) => ({ ...form, description: event.target.value }))} placeholder="描述研发目标、范围或负责人关注点" rows={4} /></label><div className="project-modal-actions"><button className="ghost" onClick={() => setProjectModalOpen(false)}>取消</button><button className="primary" onClick={() => void saveProject()}>创建并进入</button></div></div></div> : null}
       {!accessCode || codeInput ? <div className="modal-backdrop"><div className="access-modal"><span className="seal">研</span><p className="eyebrow">SECURE DEMO</p><h2>进入研知 Agent</h2><p>请输入演示访问码。它只保存在当前浏览器会话中，用于保护 AI 调用额度。</p><input autoFocus value={codeInput} onChange={(event) => { setCodeInput(event.target.value); setAuthError(""); }} onKeyDown={(event) => event.key === "Enter" && void unlock()} placeholder="演示访问码" type="password" />{authError ? <div className="form-error">{authError}</div> : null}<button className="primary" disabled={loading} onClick={() => void unlock()}>{loading ? "正在验证…" : "进入工作台"}</button>{accessCode ? <button className="text-button" onClick={() => setCodeInput("")}>取消</button> : null}</div></div> : null}
       {message ? <div className="toast">{message}</div> : null}

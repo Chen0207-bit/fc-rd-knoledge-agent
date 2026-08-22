@@ -35,6 +35,24 @@ type Paper = {
 const AI_MODEL = "glm-5.3";
 const FALLBACK_AI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8";
 const GLM_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+type UserAIConfig = { provider: string; endpoint: string; apiKey: string; model: string };
+
+function userAIConfig(request: Request): UserAIConfig | null {
+  const apiKey = (request.headers.get("x-user-ai-key") || "").trim().slice(0, 500);
+  const endpoint = (request.headers.get("x-user-ai-endpoint") || "").trim().slice(0, 500);
+  if (!apiKey || !endpoint) return null;
+  return {
+    provider: (request.headers.get("x-user-ai-provider") || "openai-compatible").trim().slice(0, 40),
+    endpoint,
+    apiKey,
+    model: (request.headers.get("x-user-ai-model") || AI_MODEL).trim().slice(0, 120) || AI_MODEL,
+  };
+}
+
+function chatEndpoint(endpoint: string) {
+  const clean = endpoint.replace(/\/$/, "");
+  return clean.endsWith("/chat/completions") ? clean : `${clean}/chat/completions`;
+}
 
 function responseHeaders(request: Request, env: Env) {
   const origin = request.headers.get("origin") || "";
@@ -42,7 +60,7 @@ function responseHeaders(request: Request, env: Env) {
   return {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": allowed ? origin : env.ALLOWED_ORIGIN,
-    "access-control-allow-headers": "content-type,x-demo-code",
+    "access-control-allow-headers": "content-type,x-demo-code,x-user-ai-provider,x-user-ai-endpoint,x-user-ai-key,x-user-ai-model",
     "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
     "vary": "origin",
   };
@@ -238,20 +256,21 @@ async function collectSources(env: Env, refs: string[], currentProjectId = 1) {
   return sections.join("\n\n").slice(0, 48_000);
 }
 
-async function generateAssistantReply(env: Env, messages: Array<{ role: "user" | "assistant"; content: string }>, context: string) {
+async function generateAssistantReply(env: Env, messages: Array<{ role: "user" | "assistant"; content: string }>, context: string, customConfig: UserAIConfig | null = null) {
   const system = `你是“研知 Agent”的研发知识顾问，陪伴用户完成“研究方向讨论—论文检索—人工审核—知识入库—知识产权转化”全流程。
 回答要简洁、具体、可执行：优先给出检索关键词、筛选标准、下一步操作和风险提示。不要编造论文、实验数据或法律结论；需要更多信息时直接提问。不要输出隐式思维链，只输出结论、依据摘要和建议。
 当前页面上下文：${context.slice(0, 12000)}`;
   const payloadMessages = [{ role: "system", content: system }, ...messages.slice(-12).map((item) => ({ role: item.role, content: item.content.slice(0, 4000) }))];
-  if (env.GLM_API_KEY) {
-    const response = await fetch(GLM_API_URL, {
+  const apiKey = customConfig?.apiKey || env.GLM_API_KEY;
+  if (apiKey) {
+    const response = await fetch(customConfig ? chatEndpoint(customConfig.endpoint) : GLM_API_URL, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${env.GLM_API_KEY}` },
-      body: JSON.stringify({ model: AI_MODEL, messages: payloadMessages, stream: false, max_tokens: 2200, temperature: 0.35 }),
+      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: customConfig?.model || AI_MODEL, messages: payloadMessages, stream: false, max_tokens: 2200, temperature: 0.35 }),
     });
     const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
     const content = result.choices?.[0]?.message?.content || "";
-    if (response.ok && content.trim()) return { content, model: AI_MODEL };
+    if (response.ok && content.trim()) return { content, model: customConfig?.model || AI_MODEL };
   }
   const fallback = await env.AI.run(FALLBACK_AI_MODEL, { messages: payloadMessages, max_tokens: 2200, temperature: 0.35 });
   const content = typeof fallback.response === "string" ? fallback.response : typeof fallback.result === "string" ? fallback.result : "暂时无法生成建议";
@@ -293,7 +312,7 @@ const worker = {
           (item.role === "user" || item.role === "assistant") && Boolean(item.content?.trim()),
         );
         if (!messages.length) return error(request, env, "请输入想讨论的内容");
-        const reply = await generateAssistantReply(env, messages, body.context || "暂无页面上下文");
+        const reply = await generateAssistantReply(env, messages, body.context || "暂无页面上下文", userAIConfig(request));
         return json(request, env, { reply: reply.content, model: reply.model });
       }
       if (request.method === "POST" && url.pathname === "/api/assistant-plan") {
@@ -308,7 +327,7 @@ JSON 字段必须为：
 文件名：${String(body.fileName || "研发文件")}
 研发文件内容：
 ${sourceText}`;
-        const reply = await generateAssistantReply(env, [{ role: "user", content: planPrompt }], "这是一个待用户确认的研发文件 Workflow Plan 生成请求。");
+        const reply = await generateAssistantReply(env, [{ role: "user", content: planPrompt }], "这是一个待用户确认的研发文件 Workflow Plan 生成请求。", userAIConfig(request));
         let plan: { summary: string; searchQueries: string[]; screeningCriteria: string[]; evidenceMap: Array<{ evidence: string; researchDirection: string; ipValue: string }>; analysisSummary: string[]; steps: string[] };
         try {
           const normalized = reply.content.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
@@ -431,6 +450,7 @@ ${sourceText}`;
         const groupName = String(body.groupName || "未分类").slice(0, 80);
         const requestedModel = body.model === "glm-5.3" || body.model === "qwen3" ? body.model : "auto";
         const speed = body.speed === "fast" || body.speed === "deep" ? body.speed : "balanced";
+        const customConfig = userAIConfig(request);
         const sourceText = await collectSources(env, body.sources || [], currentProjectId);
         if (sourceText.length < 80) return error(request, env, "没有找到可用于生成的已入库资料");
         const prompt = `你是一名严谨的中国知识产权材料撰写助手。请基于给定研发资料，输出可供专业人员复核的中文 Markdown 初稿。
@@ -456,11 +476,11 @@ ${sourceText}`;
 
 研发资料：
 ${sourceText}`;
-        const glmResponse = requestedModel !== "qwen3" && env.GLM_API_KEY ? await fetch(GLM_API_URL, {
+        const glmResponse = requestedModel !== "qwen3" && (customConfig?.apiKey || env.GLM_API_KEY) ? await fetch(customConfig ? chatEndpoint(customConfig.endpoint) : GLM_API_URL, {
           method: "POST",
-          headers: { "content-type": "application/json", authorization: `Bearer ${env.GLM_API_KEY}` },
+          headers: { "content-type": "application/json", authorization: `Bearer ${customConfig?.apiKey || env.GLM_API_KEY}` },
           body: JSON.stringify({
-            model: "glm-5.3",
+            model: customConfig?.model || "glm-5.3",
             messages: [
               { role: "system", content: "你负责把研发证据转化为结构严谨、边界清楚的知识产权材料初稿。" },
               { role: "user", content: prompt },
@@ -471,7 +491,7 @@ ${sourceText}`;
           }),
         }) : null;
         const result = glmResponse ? await glmResponse.json() as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } } : {};
-        let usedModel = requestedModel === "qwen3" ? FALLBACK_AI_MODEL : AI_MODEL;
+        let usedModel = requestedModel === "qwen3" ? FALLBACK_AI_MODEL : customConfig?.model || AI_MODEL;
         let markdown = glmResponse?.ok ? result.choices?.[0]?.message?.content || "" : "";
         if (!markdown.trim()) {
           const fallback = await env.AI.run(FALLBACK_AI_MODEL, {
