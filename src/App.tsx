@@ -105,6 +105,7 @@ export default function App() {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMinimized, setChatMinimized] = useState(false);
   const [chatPosition, setChatPosition] = useState<{ left: number; top: number } | null>(null);
+  const [chatNormalPosition, setChatNormalPosition] = useState<{ left: number; top: number } | null>(null);
   const [chatDragging, setChatDragging] = useState<{ offsetX: number; offsetY: number } | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
@@ -112,6 +113,7 @@ export default function App() {
   const [activeDraft, setActiveDraft] = useState<Draft | null>(null);
   const [k3Ready, setK3Ready] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const chatFileRef = useRef<HTMLInputElement>(null);
   const chatWindowRef = useRef<HTMLElement>(null);
 
   const api = useCallback(async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
@@ -340,6 +342,29 @@ export default function App() {
     finally { setChatBusy(false); }
   }
 
+  async function runFileWorkflow(file?: File) {
+    if (!file || chatBusy) return;
+    setChatBusy(true);
+    setChatMessages((messages) => [...messages, { role: "user", content: `请导入研发文件并完成知识产权初稿：${file.name}` }]);
+    try {
+      const documentId = await uploadDocument(file);
+      if (!documentId) return;
+      const title = file.name.replace(/\.(pdf|docx)$/i, "") || "研发文件知识产权材料";
+      const sourceRef = `document:${documentId}`;
+      setSelectedSources([sourceRef]);
+      setDraftTitle(title);
+      setView("ip");
+      setChatMessages((messages) => [...messages, { role: "assistant", content: "文件已导入当前项目。正在基于文件内容生成知识产权申报初稿，完成后会在“知识产权材料”页面展示。" }]);
+      await generateDraft([sourceRef], title);
+      setChatMessages((messages) => [...messages, { role: "assistant", content: "文件闭环已完成：研发文件已入库，并已生成知识产权申报初稿。请在右侧预览区复核。" }]);
+    } catch (error) {
+      setChatMessages((messages) => [...messages, { role: "assistant", content: error instanceof Error ? error.message : "文件闭环执行失败" }]);
+    } finally {
+      setChatBusy(false);
+      if (chatFileRef.current) chatFileRef.current.value = "";
+    }
+  }
+
   function startChatDrag(event: React.PointerEvent<HTMLElement>) {
     if ((event.target as HTMLElement).closest("button")) return;
     const rect = chatWindowRef.current?.getBoundingClientRect();
@@ -347,6 +372,19 @@ export default function App() {
     event.currentTarget.setPointerCapture?.(event.pointerId);
     setChatPosition({ left: rect.left, top: rect.top });
     setChatDragging({ offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top });
+  }
+
+  function toggleChatMinimized() {
+    const rect = chatWindowRef.current?.getBoundingClientRect();
+    if (!chatMinimized) {
+      if (rect) setChatNormalPosition({ left: rect.left, top: rect.top });
+      const width = 260;
+      setChatPosition({ left: Math.max(8, window.innerWidth - width - 16), top: Math.max(8, window.innerHeight - 58) });
+      setChatMinimized(true);
+    } else {
+      setChatPosition(chatNormalPosition);
+      setChatMinimized(false);
+    }
   }
 
   async function previewDocument(id: number) {
@@ -360,18 +398,20 @@ export default function App() {
     setPreview({ kind: "paper", title: paper.title, content: `作者：${paper.authors.join("、") || "未知"}\n\n摘要：\n${paper.abstract || "暂无摘要"}`, url: paper.url });
   }
 
-  async function uploadDocument(file?: File) {
-    if (!file) return;
+  async function uploadDocument(file?: File): Promise<number | undefined> {
+    if (!file) return undefined;
     setLoading(true);
     notify("正在本地解析研发文件");
     try {
       const text = await extractFile(file);
       if (text.trim().length < 80) throw new Error("未提取到足够文字，请换用可复制文字的文件");
-      await api("/api/documents", { method: "POST", body: JSON.stringify({ name: file.name, mimeType: file.type || "application/octet-stream", size: file.size, text }) });
+      const data = await api<{ id: number }>("/api/documents", { method: "POST", body: JSON.stringify({ name: file.name, mimeType: file.type || "application/octet-stream", size: file.size, text }) });
       notify("文件解析完成，原文件未上传");
       await refresh();
+      return data.id;
     } catch (error) {
       notify(error instanceof Error ? error.message : "文件导入失败");
+      return undefined;
     } finally {
       setLoading(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -382,8 +422,10 @@ export default function App() {
     setSelectedSources((current) => current.includes(ref) ? current.filter((item) => item !== ref) : [...current, ref]);
   }
 
-  async function generateDraft() {
-    if (!selectedSources.length) return notify("请先选择至少一份论文或研发文件");
+  async function generateDraft(sourceOverride?: string[], titleOverride?: string) {
+    const sourceRefs = sourceOverride || selectedSources;
+    const materialTitle = titleOverride || draftTitle;
+    if (!sourceRefs.length) return notify("请先选择至少一份论文或研发文件");
     if (IS_LOCAL_DEMO && modelChoice !== "k3") return notify("本地页面目前只支持 K3；公网 Demo 可选择 GLM-5.3 或 Workers AI");
     setLoading(true);
     setActiveDraft(null);
@@ -392,11 +434,11 @@ export default function App() {
     try {
       if (IS_LOCAL_DEMO) {
         if (!k3Ready) throw new Error("K3 本地服务未启动，请先运行 npm run k3");
-        const context = await api<{ sourceText: string }>("/api/source-context", { method: "POST", body: JSON.stringify({ sources: selectedSources }) });
+        const context = await api<{ sourceText: string }>("/api/source-context", { method: "POST", body: JSON.stringify({ sources: sourceRefs }) });
         const response = await fetch(`${K3_LOCAL_BASE}/generate`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ title: draftTitle, sourceText: context.sourceText }),
+          body: JSON.stringify({ title: materialTitle, sourceText: context.sourceText }),
         });
         const localData = await response.json();
         if (!response.ok) throw new Error(localData.error || `K3 请求失败（${response.status}）`);
@@ -406,7 +448,7 @@ export default function App() {
         notify("K3 已生成知识产权材料初稿");
         return;
       }
-      const data = await api<{ draft: Draft }>("/api/ip-drafts", { method: "POST", body: JSON.stringify({ title: draftTitle, sources: selectedSources, groupName: draftGroup, model: modelChoice, speed: speedChoice }) });
+      const data = await api<{ draft: Draft }>("/api/ip-drafts", { method: "POST", body: JSON.stringify({ title: materialTitle, sources: sourceRefs, groupName: draftGroup, model: modelChoice, speed: speedChoice }) });
       setActiveDraft(data.draft);
       notify("知识产权材料初稿已生成");
       await refresh();
@@ -535,7 +577,7 @@ export default function App() {
         )}
       </main>
 
-      {chatOpen ? <aside ref={chatWindowRef} style={chatPosition ? { left: chatPosition.left, top: chatPosition.top, right: "auto", bottom: "auto" } : undefined} className={`chat-window${chatMinimized ? " minimized" : ""}`}><div className="chat-head" onPointerDown={startChatDrag}><div onClick={() => setChatMinimized((value) => !value)}><p className="eyebrow">RESEARCH COPILOT</p><strong>与研知 Agent 对话</strong><small>{chatMinimized ? "点击恢复对话 · 可拖动" : "会话会持续到本次浏览器会话结束 · 可拖动"}</small></div><div className="chat-window-actions"><button title={chatMinimized ? "恢复" : "最小化"} onClick={() => setChatMinimized((value) => !value)}>{chatMinimized ? "□" : "—"}</button><button title="关闭" onClick={() => setChatOpen(false)}>×</button></div></div>{!chatMinimized ? <><div className="chat-body">{chatMessages.length ? chatMessages.map((item, index) => <div className={`chat-bubble ${item.role}`} key={`${item.role}-${index}`}><p>{item.content}</p>{item.model ? <small>{item.model}</small> : null}</div>) : <div className="chat-welcome"><strong>先从研究方向开始</strong><p>例如：“我想做工业视觉缺陷检测，帮我拆分检索主题和筛选标准。”</p></div>}{chatBusy ? <div className="chat-bubble assistant typing">Agent 正在整理建议…</div> : null}</div><div className="chat-compose"><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder="讨论论文方向、关键词或转化思路…" rows={2} /><button className="primary" disabled={chatBusy || !chatInput.trim()} onClick={() => void sendChat()}>发送</button></div></> : null}</aside> : null}
+      {chatOpen ? <aside ref={chatWindowRef} style={chatPosition ? { left: chatPosition.left, top: chatPosition.top, right: "auto", bottom: "auto" } : undefined} className={`chat-window${chatMinimized ? " minimized" : ""}`}><div className="chat-head" onPointerDown={startChatDrag}><div><p className="eyebrow">RESEARCH COPILOT</p><strong>与研知 Agent 对话</strong><small>{chatMinimized ? "点击恢复对话 · 可拖动" : "会话会持续到本次浏览器会话结束 · 可拖动"}</small></div><div className="chat-window-actions"><button title={chatMinimized ? "恢复" : "最小化"} onClick={toggleChatMinimized}>{chatMinimized ? "□" : "—"}</button><button title="关闭" onClick={() => setChatOpen(false)}>×</button></div></div>{!chatMinimized ? <><div className="chat-body">{chatMessages.length ? chatMessages.map((item, index) => <div className={`chat-bubble ${item.role}`} key={`${item.role}-${index}`}><p>{item.content}</p>{item.model ? <small>{item.model}</small> : null}</div>) : <div className="chat-welcome"><strong>先从研究方向开始</strong><p>你也可以直接导入 PDF/DOCX，让 Agent 自动完成“文件入库 → 知识产权初稿”。</p></div>}{chatBusy ? <div className="chat-bubble assistant typing">Agent 正在处理文件或整理建议…</div> : null}</div><div className="chat-compose"><input ref={chatFileRef} hidden type="file" accept=".pdf,.docx" onChange={(event) => void runFileWorkflow(event.target.files?.[0])} /><button className="chat-upload" disabled={chatBusy} onClick={() => chatFileRef.current?.click()}>导入文件并完成闭环</button><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder="讨论论文方向、关键词或转化思路…" rows={2} /><button className="primary" disabled={chatBusy || !chatInput.trim()} onClick={() => void sendChat()}>发送</button></div></> : null}</aside> : null}
       {preview ? <div className="modal-backdrop" onClick={() => setPreview(null)}><div className="preview-modal" onClick={(event) => event.stopPropagation()}><div className="preview-head"><div><p className="eyebrow">ONLINE PREVIEW</p><h2>{preview.title}</h2></div><button className="ghost" onClick={() => setPreview(null)}>关闭</button></div>{preview.kind === "paper" && preview.url ? <a href={preview.url} target="_blank" rel="noreferrer">打开原文 ↗</a> : null}<pre>{preview.content}</pre></div></div> : null}
       {projectModalOpen ? <div className="modal-backdrop" onClick={() => setProjectModalOpen(false)}><div className="project-modal" onClick={(event) => event.stopPropagation()}><p className="eyebrow">NEW PROJECT</p><h2>新增研发项目</h2><p>项目之间的论文、研发文件、审核任务和申报材料相互隔离。</p><label>项目名称<input autoFocus value={projectForm.name} onChange={(event) => setProjectForm((form) => ({ ...form, name: event.target.value }))} placeholder="例如：工业视觉缺陷检测" /></label><label>项目介绍<textarea value={projectForm.description} onChange={(event) => setProjectForm((form) => ({ ...form, description: event.target.value }))} placeholder="描述研发目标、范围或负责人关注点" rows={4} /></label><div className="project-modal-actions"><button className="ghost" onClick={() => setProjectModalOpen(false)}>取消</button><button className="primary" onClick={() => void saveProject()}>创建并进入</button></div></div></div> : null}
       {!accessCode || codeInput ? <div className="modal-backdrop"><div className="access-modal"><span className="seal">研</span><p className="eyebrow">SECURE DEMO</p><h2>进入研知 Agent</h2><p>请输入演示访问码。它只保存在当前浏览器会话中，用于保护 AI 调用额度。</p><input autoFocus value={codeInput} onChange={(event) => { setCodeInput(event.target.value); setAuthError(""); }} onKeyDown={(event) => event.key === "Enter" && void unlock()} placeholder="演示访问码" type="password" />{authError ? <div className="form-error">{authError}</div> : null}<button className="primary" disabled={loading} onClick={() => void unlock()}>{loading ? "正在验证…" : "进入工作台"}</button>{accessCode ? <button className="text-button" onClick={() => setCodeInput("")}>取消</button> : null}</div></div> : null}

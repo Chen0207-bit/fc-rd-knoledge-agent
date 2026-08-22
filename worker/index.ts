@@ -372,8 +372,8 @@ const worker = {
         const body = await request.json() as { name?: string; mimeType?: string; size?: number; text?: string; groupName?: string };
         if (!body.name || !body.text || body.text.trim().length < 80) return error(request, env, "研发文件文本不足");
         if ((body.size || 0) > 15 * 1024 * 1024) return error(request, env, "文件超过 15 MB");
-        await env.DB.prepare("INSERT INTO documents (project_id, name, mime_type, size, text, group_name) VALUES (?, ?, ?, ?, ?, ?)").bind(currentProjectId, body.name.slice(0, 500), body.mimeType || "", body.size || 0, body.text.slice(0, 120_000), String(body.groupName || "未分类").slice(0, 80)).run();
-        return json(request, env, { ok: true }, 201);
+        const insert = await env.DB.prepare("INSERT INTO documents (project_id, name, mime_type, size, text, group_name) VALUES (?, ?, ?, ?, ?, ?)").bind(currentProjectId, body.name.slice(0, 500), body.mimeType || "", body.size || 0, body.text.slice(0, 120_000), String(body.groupName || "未分类").slice(0, 80)).run();
+        return json(request, env, { ok: true, id: Number(insert.meta?.last_row_id || 0) }, 201);
       }
 
       if (request.method === "GET" && url.pathname === "/api/documents") {
