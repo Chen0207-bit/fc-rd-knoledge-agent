@@ -296,6 +296,28 @@ const worker = {
         const reply = await generateAssistantReply(env, messages, body.context || "暂无页面上下文");
         return json(request, env, { reply: reply.content, model: reply.model });
       }
+      if (request.method === "POST" && url.pathname === "/api/assistant-plan") {
+        const body = await request.json() as { sourceText?: string; fileName?: string; projectDescription?: string };
+        const sourceText = String(body.sourceText || "").slice(0, 48_000);
+        if (sourceText.length < 80) return error(request, env, "研发文件内容不足，无法制定计划");
+        const planPrompt = `请为研发文件设计一个可执行的研发知识闭环计划。只输出 JSON，不要 Markdown 代码块，不要输出隐式思维链。
+JSON 字段必须为：
+{"summary":"一句话目标","searchQuery":"英文或中文论文检索主题","screeningCriteria":["论文筛选标准1","论文筛选标准2"],"steps":["步骤1","步骤2","步骤3"]}
+要求：searchQuery 适合 arXiv、Semantic Scholar、Crossref 检索；步骤必须覆盖文件解析、论文搜索、Agent 初审、用户确认入库、知识产权材料生成；不要编造文件中没有的技术事实。
+项目介绍：${String(body.projectDescription || "").slice(0, 800)}
+文件名：${String(body.fileName || "研发文件")}
+研发文件内容：
+${sourceText}`;
+        const reply = await generateAssistantReply(env, [{ role: "user", content: planPrompt }], "这是一个待用户确认的研发文件 Workflow Plan 生成请求。");
+        let plan: { summary: string; searchQuery: string; screeningCriteria: string[]; steps: string[] };
+        try {
+          const normalized = reply.content.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
+          plan = JSON.parse(normalized) as typeof plan;
+        } catch {
+          plan = { summary: `围绕“${body.fileName || "研发文件"}”完成论文检索、审核入库与知识产权转化`, searchQuery: "research intelligence agent", screeningCriteria: ["与研发主题高度相关", "有明确技术方案或实验依据"], steps: ["解析研发文件并提炼技术主题", "检索并筛选相关论文", "Agent 初审后交由用户确认入库", "生成知识产权申报材料初稿"] };
+        }
+        return json(request, env, { plan, model: reply.model });
+      }
       if (request.method === "GET" && url.pathname === "/api/papers/search") {
         const query = (url.searchParams.get("q") || "").trim();
         if (query.length < 2) return error(request, env, "请输入至少两个字符的检索主题");
@@ -329,7 +351,8 @@ const worker = {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'in', ?)
           ON CONFLICT(source, external_id) DO UPDATE SET title=excluded.title, authors=excluded.authors, abstract=excluded.abstract, published_at=excluded.published_at, url=excluded.url, pdf_url=excluded.pdf_url`)
           .bind(currentProjectId, paper.source, scopedExternalId, paper.title.slice(0, 600), JSON.stringify(paper.authors || []), (paper.abstract || "").slice(0, 30_000), paper.publishedAt || "", paper.url || "", paper.pdfUrl || "", String(paper.groupName || "未分类").slice(0, 80)).run();
-        return json(request, env, { ok: true }, 201);
+        const saved = await env.DB.prepare("SELECT id FROM papers WHERE project_id = ? AND source = ? AND external_id = ?").bind(currentProjectId, paper.source, scopedExternalId).first<{ id: number }>();
+        return json(request, env, { ok: true, id: Number(saved?.id || 0) }, 201);
       }
 
       if (request.method === "GET" && url.pathname === "/api/papers") {
