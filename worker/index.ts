@@ -228,6 +228,26 @@ async function collectSources(env: Env, refs: string[]) {
   return sections.join("\n\n").slice(0, 48_000);
 }
 
+async function generateAssistantReply(env: Env, messages: Array<{ role: "user" | "assistant"; content: string }>, context: string) {
+  const system = `你是“研知 Agent”的研发知识顾问，陪伴用户完成“研究方向讨论—论文检索—人工审核—知识入库—知识产权转化”全流程。
+回答要简洁、具体、可执行：优先给出检索关键词、筛选标准、下一步操作和风险提示。不要编造论文、实验数据或法律结论；需要更多信息时直接提问。不要输出隐式思维链，只输出结论、依据摘要和建议。
+当前页面上下文：${context.slice(0, 12000)}`;
+  const payloadMessages = [{ role: "system", content: system }, ...messages.slice(-12).map((item) => ({ role: item.role, content: item.content.slice(0, 4000) }))];
+  if (env.GLM_API_KEY) {
+    const response = await fetch(GLM_API_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${env.GLM_API_KEY}` },
+      body: JSON.stringify({ model: AI_MODEL, messages: payloadMessages, stream: false, max_tokens: 1200, temperature: 0.35 }),
+    });
+    const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const content = result.choices?.[0]?.message?.content || "";
+    if (response.ok && content.trim()) return { content, model: AI_MODEL };
+  }
+  const fallback = await env.AI.run(FALLBACK_AI_MODEL, { messages: payloadMessages, max_tokens: 1200, temperature: 0.35 });
+  const content = typeof fallback.response === "string" ? fallback.response : typeof fallback.result === "string" ? fallback.result : "暂时无法生成建议";
+  return { content, model: FALLBACK_AI_MODEL };
+}
+
 const worker = {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: responseHeaders(request, env) });
@@ -237,6 +257,15 @@ const worker = {
 
     try {
       await ensureFeatureColumns(env);
+      if (request.method === "POST" && url.pathname === "/api/assistant-chat") {
+        const body = await request.json() as { messages?: Array<{ role?: string; content?: string }>; context?: string };
+        const messages = (body.messages || []).filter((item): item is { role: "user" | "assistant"; content: string } =>
+          (item.role === "user" || item.role === "assistant") && Boolean(item.content?.trim()),
+        );
+        if (!messages.length) return error(request, env, "请输入想讨论的内容");
+        const reply = await generateAssistantReply(env, messages, body.context || "暂无页面上下文");
+        return json(request, env, { reply: reply.content, model: reply.model });
+      }
       if (request.method === "GET" && url.pathname === "/api/papers/search") {
         const query = (url.searchParams.get("q") || "").trim();
         if (query.length < 2) return error(request, env, "请输入至少两个字符的检索主题");

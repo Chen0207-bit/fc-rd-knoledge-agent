@@ -8,8 +8,10 @@ pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
 type View = "dashboard" | "discover" | "review" | "library" | "ip";
 type PaperStatus = "pending" | "approved" | "rejected";
 const GROUPS = ["未分类", "算法研究", "产品技术", "专利候选", "竞品情报"];
+try { GROUPS.push(...(JSON.parse(localStorage.getItem("rd-custom-groups") || "[]") as string[]).filter((group) => !GROUPS.includes(group))); } catch { /* first visit */ }
 type ModelChoice = "auto" | "glm-5.3" | "qwen3" | "k3";
 type SpeedChoice = "fast" | "balanced" | "deep";
+type ChatMessage = { role: "user" | "assistant"; content: string; model?: string };
 type Paper = {
   id?: number;
   source: "arxiv" | "semantic_scholar" | "crossref";
@@ -94,6 +96,11 @@ export default function App() {
   const [preview, setPreview] = useState<{ kind: "paper" | "document"; title: string; content: string; url?: string } | null>(null);
   const [libraryGroup, setLibraryGroup] = useState("全部分组");
   const [draftGroupFilter, setDraftGroupFilter] = useState("全部分组");
+  const [customGroups, setCustomGroups] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem("rd-custom-groups") || "[]") as string[]; } catch { return []; } });
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatInput, setChatInput] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => { try { return JSON.parse(sessionStorage.getItem("rd-agent-chat") || "[]") as ChatMessage[]; } catch { return []; } });
   const [activeDraft, setActiveDraft] = useState<Draft | null>(null);
   const [k3Ready, setK3Ready] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -138,6 +145,8 @@ export default function App() {
   }, [accessCode, api]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { localStorage.setItem("rd-custom-groups", JSON.stringify(customGroups)); }, [customGroups]);
+  useEffect(() => { sessionStorage.setItem("rd-agent-chat", JSON.stringify(chatMessages.slice(-20))); }, [chatMessages]);
 
   useEffect(() => {
     if (!IS_LOCAL_DEMO) return;
@@ -220,6 +229,34 @@ export default function App() {
       if (type === "draft") setDrafts((items) => items.map((item) => item.id === id ? { ...item, groupName } : item));
       notify("分组已更新");
     } catch (error) { notify(error instanceof Error ? error.message : "分组更新失败"); }
+  }
+
+  const allGroups = useMemo(() => [...GROUPS, ...customGroups.filter((group) => !GROUPS.includes(group))], [customGroups]);
+
+  function createCustomGroup() {
+    const name = window.prompt("请输入新分组名称");
+    const trimmed = name?.trim().slice(0, 30);
+    if (!trimmed) return;
+    if (!allGroups.includes(trimmed)) { GROUPS.push(trimmed); setCustomGroups((groups) => [...groups, trimmed]); }
+    notify(`已创建分组：${trimmed}`);
+  }
+
+  function chatContext() {
+    return `当前页面：${view}；当前检索词：${query}；候选论文数量：${searchResults.length}；已入库论文数量：${approvedPapers.length}；已导入研发文件数量：${documents.length}。具体论文或文件内容只有在用户主动粘贴到对话框后才会发送。`;
+  }
+
+  async function sendChat() {
+    const content = chatInput.trim();
+    if (!content || chatBusy) return;
+    const nextMessages = [...chatMessages, { role: "user" as const, content }];
+    setChatMessages(nextMessages);
+    setChatInput("");
+    setChatBusy(true);
+    try {
+      const data = await api<{ reply: string; model: string }>("/api/assistant-chat", { method: "POST", body: JSON.stringify({ messages: nextMessages, context: chatContext() }) });
+      setChatMessages((messages) => [...messages, { role: "assistant", content: data.reply, model: data.model }]);
+    } catch (error) { notify(error instanceof Error ? error.message : "Agent 对话失败"); }
+    finally { setChatBusy(false); }
   }
 
   async function previewDocument(id: number) {
@@ -337,7 +374,7 @@ export default function App() {
         {view === "dashboard" && (
           <>
             <section className="hero">
-              <div><span className="hero-label">AGENT WORKFLOW</span><h2>把分散的研究，<br/>变成可沉淀的创新资产。</h2><p>自动发现论文、审核入库，再从研发资料生成知识产权材料初稿。</p><button className="primary" onClick={() => setView("discover")}>启动论文采集 <span>→</span></button></div>
+              <div><span className="hero-label">AGENT WORKFLOW</span><h2>把分散的研究，<br/>变成可沉淀的创新资产。</h2><p>自动发现论文、审核入库，再从研发资料生成知识产权材料初稿。</p><div className="hero-actions"><button className="primary" onClick={() => setView("discover")}>启动论文采集 <span>→</span></button><button className="chat-launch" onClick={() => setChatOpen(true)}>与 Agent 对话 <span>⌁</span></button></div></div>
               <div className="flow-card">
                 <div className="flow-head"><span>研发知识闭环</span><b>真实流程</b></div>
                 {[["01","发现","arXiv + Semantic Scholar","done"],["02","审核","证据与质量校验","done"],["03","沉淀","论文与研发文件入库","current"],["04","转化","生成知识产权材料",""]].map(([n,t,d,s])=><div className={`flow-row ${s}`} key={n}><i>{s==="done"?"✓":n}</i><div><strong>{t}</strong><span>{d}</span></div><b>{s==="current"?"进行中":"›"}</b></div>)}
@@ -375,8 +412,8 @@ export default function App() {
         {view === "library" && (
           <section className="workspace">
             <div className="workspace-head"><div><p className="eyebrow">R&D KNOWLEDGE BASE</p><h2>研发知识库</h2><p>论文与研发文档统一沉淀，为成果转化提供可信上下文。</p></div><><input ref={fileRef} hidden type="file" accept=".pdf,.docx" onChange={(event) => void uploadDocument(event.target.files?.[0])} /><button className="primary" disabled={loading} onClick={() => fileRef.current?.click()}>导入 PDF / DOCX</button></></div>
-            <div className="library-toolbar"><label>当前分组<select value={libraryGroup} onChange={(event) => setLibraryGroup(event.target.value)}><option>全部分组</option>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select></label><span>已入库论文 {approvedPapers.length} 篇 · 已出库 {removedPapers.length} 篇</span></div>
-            <div className="library-columns"><div><h3>已入库论文 <span>{visibleApprovedPapers.length}</span></h3>{visibleApprovedPapers.length ? visibleApprovedPapers.map((paper) => <div className="library-item" key={paper.externalId}><PaperRow paper={paper} onPreview={() => previewPaper(paper)} /><div className="item-actions"><select value={paper.groupName || "未分类"} onChange={(event) => void changeGroup("paper", paper.id!, event.target.value)}>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost" onClick={() => previewPaper(paper)}>在线预览</button><button className="ghost danger" onClick={() => void changePaperLibrary(paper.id!, "remove")}>出库</button></div></div>) : <EmptyState title="暂无已入库论文" detail="先在审核中心通过一篇论文。" />}</div><div><h3>研发文件 <span>{visibleDocuments.length}</span></h3>{visibleDocuments.length ? visibleDocuments.map((doc) => <div className="doc-row" key={doc.id}><i>DOC</i><div><strong>{doc.name}</strong><p>{Math.round(doc.size / 1024)} KB · {formatDate(doc.createdAt)} · {doc.groupName || "未分类"}</p></div><select value={doc.groupName || "未分类"} onChange={(event) => void changeGroup("document", doc.id, event.target.value)}>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost" onClick={() => void previewDocument(doc.id)}>预览</button></div>) : <EmptyState title="尚未导入研发文件" detail="文件在浏览器本地解析，原文件不会上传。" />}</div></div>
+            <div className="library-toolbar"><label>当前分组<select value={libraryGroup} onChange={(event) => setLibraryGroup(event.target.value)}><option>全部分组</option>{allGroups.map((group) => <option key={group}>{group}</option>)}</select></label><button className="ghost" onClick={createCustomGroup}>+ 新建分组</button><span>已入库论文 {approvedPapers.length} 篇 · 已出库 {removedPapers.length} 篇</span></div>
+            <div className="library-columns"><div><h3>已入库论文 <span>{visibleApprovedPapers.length}</span></h3>{visibleApprovedPapers.length ? visibleApprovedPapers.map((paper) => <div className="library-item" key={paper.externalId}><PaperRow paper={paper} onPreview={() => previewPaper(paper)} /><div className="item-actions"><select value={paper.groupName || "未分类"} onChange={(event) => void changeGroup("paper", paper.id!, event.target.value)}>{allGroups.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost" onClick={() => previewPaper(paper)}>在线预览</button><button className="ghost danger" onClick={() => void changePaperLibrary(paper.id!, "remove")}>出库</button></div></div>) : <EmptyState title="暂无已入库论文" detail="先在审核中心通过一篇论文。" />}</div><div><h3>研发文件 <span>{visibleDocuments.length}</span></h3>{visibleDocuments.length ? visibleDocuments.map((doc) => <div className="doc-row" key={doc.id}><i>DOC</i><div><strong>{doc.name}</strong><p>{Math.round(doc.size / 1024)} KB · {formatDate(doc.createdAt)} · {doc.groupName || "未分类"}</p></div><select value={doc.groupName || "未分类"} onChange={(event) => void changeGroup("document", doc.id, event.target.value)}>{allGroups.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost" onClick={() => void previewDocument(doc.id)}>预览</button></div>) : <EmptyState title="尚未导入研发文件" detail="文件在浏览器本地解析，原文件不会上传。" />}</div></div>
             {removedPapers.length ? <div className="removed-panel"><h3>已出库论文</h3>{removedPapers.map((paper) => <div className="removed-row" key={paper.id}><span>{paper.title}</span><button className="ghost" onClick={() => void changePaperLibrary(paper.id!, "restore")}>恢复入库</button></div>)}</div> : null}
           </section>
         )}
@@ -397,6 +434,7 @@ export default function App() {
         )}
       </main>
 
+      {chatOpen ? <aside className="chat-window"><div className="chat-head"><div><p className="eyebrow">RESEARCH COPILOT</p><strong>与研知 Agent 对话</strong><small>会话会持续到本次浏览器会话结束</small></div><button onClick={() => setChatOpen(false)}>×</button></div><div className="chat-body">{chatMessages.length ? chatMessages.map((item, index) => <div className={`chat-bubble ${item.role}`} key={`${item.role}-${index}`}><p>{item.content}</p>{item.model ? <small>{item.model}</small> : null}</div>) : <div className="chat-welcome"><strong>先从研究方向开始</strong><p>例如：“我想做工业视觉缺陷检测，帮我拆分检索主题和筛选标准。”</p></div>}{chatBusy ? <div className="chat-bubble assistant typing">Agent 正在整理建议…</div> : null}</div><div className="chat-compose"><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder="讨论论文方向、关键词或转化思路…" rows={2} /><button className="primary" disabled={chatBusy || !chatInput.trim()} onClick={() => void sendChat()}>发送</button></div></aside> : null}
       {preview ? <div className="modal-backdrop" onClick={() => setPreview(null)}><div className="preview-modal" onClick={(event) => event.stopPropagation()}><div className="preview-head"><div><p className="eyebrow">ONLINE PREVIEW</p><h2>{preview.title}</h2></div><button className="ghost" onClick={() => setPreview(null)}>关闭</button></div>{preview.kind === "paper" && preview.url ? <a href={preview.url} target="_blank" rel="noreferrer">打开原文 ↗</a> : null}<pre>{preview.content}</pre></div></div> : null}
       {!accessCode || codeInput ? <div className="modal-backdrop"><div className="access-modal"><span className="seal">研</span><p className="eyebrow">SECURE DEMO</p><h2>进入研知 Agent</h2><p>请输入演示访问码。它只保存在当前浏览器会话中，用于保护 AI 调用额度。</p><input autoFocus value={codeInput} onChange={(event) => { setCodeInput(event.target.value); setAuthError(""); }} onKeyDown={(event) => event.key === "Enter" && void unlock()} placeholder="演示访问码" type="password" />{authError ? <div className="form-error">{authError}</div> : null}<button className="primary" disabled={loading} onClick={() => void unlock()}>{loading ? "正在验证…" : "进入工作台"}</button>{accessCode ? <button className="text-button" onClick={() => setCodeInput("")}>取消</button> : null}</div></div> : null}
       {message ? <div className="toast">{message}</div> : null}
