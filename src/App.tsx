@@ -231,7 +231,10 @@ export default function App() {
     } catch (error) { notify(error instanceof Error ? error.message : "分组更新失败"); }
   }
 
-  const allGroups = useMemo(() => [...GROUPS, ...customGroups.filter((group) => !GROUPS.includes(group))], [customGroups]);
+  const allGroups = useMemo(() => {
+    const storedGroups = [...papers, ...documents, ...drafts].map((item) => (item as { groupName?: string }).groupName).filter((group): group is string => Boolean(group));
+    return [...GROUPS, ...customGroups, ...storedGroups].filter((group, index, groups) => groups.indexOf(group) === index);
+  }, [customGroups, papers, documents, drafts]);
 
   function createCustomGroup() {
     const name = window.prompt("请输入新分组名称");
