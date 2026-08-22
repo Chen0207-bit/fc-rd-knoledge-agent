@@ -38,6 +38,7 @@ type Paper = {
 };
 type DocumentItem = { id: number; name: string; mimeType: string; size: number; textPreview?: string; text?: string; createdAt: string; groupName?: string };
 type Draft = { id: number; title: string; sourceRefs: string; markdown: string; model: string; groupName?: string; createdAt: string };
+type DraftStage = "ai_draft" | "rd_review" | "ip_review" | "agency" | "final";
 type Stats = { discovered: number; pending: number; approved: number; documents: number; drafts: number };
 
 const DEFAULT_AI_CONFIG: AIConfig = { enabled: false, provider: "glm", endpoint: "https://open.bigmodel.cn/api/paas/v4", apiKey: "", model: "glm-5.3", remember: false };
@@ -69,6 +70,22 @@ function formatDate(value?: string) {
 
 function sourceLabel(source: Paper["source"]) {
   return source === "arxiv" ? "arXiv" : source === "crossref" ? "Crossref" : "S2";
+}
+
+const DRAFT_STAGES: Array<[DraftStage, string, string]> = [
+  ["ai_draft", "AI 初稿", "Agent 已生成，等待研发负责人检查"],
+  ["rd_review", "研发负责人审核", "核对技术事实、数据和研发文件依据"],
+  ["ip_review", "知识产权审核", "核对创新点、权利要求和保护范围"],
+  ["agency", "代理机构修改", "补充格式、法律表达和申请文件细节"],
+  ["final", "最终定稿", "完成内部确认，可进入申报流程"],
+];
+
+function stageLabel(stage: DraftStage) {
+  return DRAFT_STAGES.find(([value]) => value === stage)?.[1] || "AI 初稿";
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character] || character));
 }
 
 async function extractFile(file: File) {
@@ -142,6 +159,10 @@ export default function App() {
   const [resumeTask, setResumeTask] = useState<ResumeTask | null>(readResumeTask);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => { try { return JSON.parse(sessionStorage.getItem("rd-agent-chat") || "[]") as ChatMessage[]; } catch { return []; } });
   const [activeDraft, setActiveDraft] = useState<Draft | null>(null);
+  const [draftStages, setDraftStages] = useState<Record<number, DraftStage>>(() => { try { return JSON.parse(localStorage.getItem("rd-draft-stages") || "{}") as Record<number, DraftStage>; } catch { return {}; } });
+  const [skillDetail, setSkillDetail] = useState<string | null>(null);
+  const [feishuDemoOpen, setFeishuDemoOpen] = useState(false);
+  const [feishuConfig, setFeishuConfig] = useState({ appId: "", appSecret: "", tenant: "", space: "研发知识空间", syncFiles: true, notify: true, approval: true });
   const [k3Ready, setK3Ready] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const chatFileRef = useRef<HTMLInputElement>(null);
@@ -198,6 +219,7 @@ export default function App() {
   useEffect(() => { localStorage.setItem("rd-ui-preset", uiPreset); }, [uiPreset]);
   useEffect(() => { localStorage.setItem("rd-theme-preference", themePreference); }, [themePreference]);
   useEffect(() => { sessionStorage.setItem("rd-agent-chat", JSON.stringify(chatMessages.slice(-20))); }, [chatMessages]);
+  useEffect(() => { localStorage.setItem("rd-draft-stages", JSON.stringify(draftStages)); }, [draftStages]);
 
   useEffect(() => {
     if (!IS_LOCAL_DEMO) return;
@@ -622,6 +644,25 @@ export default function App() {
     URL.revokeObjectURL(url);
   }
 
+  function downloadDraftWord(draft: Draft) {
+    const html = `<html><head><meta charset="utf-8"><title>${escapeHtml(draft.title)}</title></head><body><h1>${escapeHtml(draft.title)}</h1><p>审核阶段：${stageLabel(draftStages[draft.id] || "ai_draft")}</p><pre style="white-space:pre-wrap;font-family:Microsoft YaHei, sans-serif;line-height:1.7">${escapeHtml(draft.markdown)}</pre></body></html>`;
+    const blob = new Blob([html], { type: "application/msword;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${draft.title}.doc`;
+    link.click();
+    URL.revokeObjectURL(url);
+    notify("已导出 Word 兼容文档");
+  }
+
+  function printDraft(draft: Draft) {
+    const printWindow = window.open("", "_blank", "noopener,noreferrer,width=960,height=720");
+    if (!printWindow) return notify("浏览器阻止了打印窗口，请允许弹窗后重试");
+    printWindow.document.write(`<html><head><title>${escapeHtml(draft.title)}</title><style>body{font-family:Microsoft YaHei,sans-serif;padding:40px;line-height:1.8;color:#17202a}pre{white-space:pre-wrap;font:inherit}</style></head><body><h1>${escapeHtml(draft.title)}</h1><p>审核阶段：${stageLabel(draftStages[draft.id] || "ai_draft")}</p><pre>${escapeHtml(draft.markdown)}</pre><script>window.onload=()=>window.print();</script></body></html>`);
+    printWindow.document.close();
+  }
+
   const approvedPapers = useMemo(() => papers.filter((paper) => paper.status === "approved" && paper.libraryState !== "removed"), [papers]);
   const visibleApprovedPapers = useMemo(() => approvedPapers.filter((paper) => libraryGroup === "全部分组" || (paper.groupName || "未分类") === libraryGroup), [approvedPapers, libraryGroup]);
   const visibleDocuments = useMemo(() => documents.filter((doc) => libraryGroup === "全部分组" || (doc.groupName || "未分类") === libraryGroup), [documents, libraryGroup]);
@@ -640,6 +681,12 @@ export default function App() {
     ] as Array<[string, string, string, string]>;
   }, [stats]);
   const pendingPapers = useMemo(() => papers.filter((paper) => paper.status === "pending"), [papers]);
+  const todoItems = useMemo(() => [
+    pendingPapers.length ? { key: "review", label: "论文待审核", detail: `${pendingPapers.length} 篇论文等待人工确认`, action: "去审核" } : null,
+    workflowPlan ? { key: "plan", label: "Workflow Plan 待确认", detail: workflowPlan.summary, action: "查看计划" } : null,
+    resumeTask ? { key: "resume", label: "继续上次研发任务", detail: `${resumeTask.fileName} · ${resumeTask.stage}`, action: "继续任务" } : null,
+    drafts.length ? { key: "draft", label: "最近生成材料", detail: `${drafts[0]?.title || "知识产权材料"} · ${stageLabel(draftStages[drafts[0]?.id] || "ai_draft")}`, action: "查看材料" } : null,
+  ].filter(Boolean) as Array<{ key: string; label: string; detail: string; action: string }>, [draftStages, drafts, pendingPapers, resumeTask, workflowPlan]);
 
   const pageTitle = ({ dashboard: "AI 工作台", discover: "论文雷达", review: "审核中心", library: "资源库", ip: "成果材料" } as Record<View, string>)[view];
   const quickPrompts = view === "discover"
@@ -685,22 +732,17 @@ export default function App() {
 
         {layoutMode === "dashboard" && view === "dashboard" && (
           <>
-            <section className="hero">
-              <div><span className="hero-label">当前项目 · {activeProject?.name || "默认研发项目"} <button className="project-inline-add" onClick={() => setProjectModalOpen(true)}>＋新增项目</button></span><h2>从搜索开始，<br/>让 Agent 参与每一步研发。</h2><p>{activeProject?.description || "先搜索论文或导入研发文件，右侧 Agent 会根据当前页面提供下一步建议。"}</p><div className="hero-actions"><button className="primary" onClick={() => setView("discover")}>开始搜索 <span>→</span></button><button className="chat-launch" onClick={() => { setChatOpen(true); setChatMinimized(false); }}>打开 AI 助手 <span>✦</span></button></div></div>
-              <div className="flow-card">
-                <div className="flow-head"><span>研发知识闭环</span><b>真实流程</b></div>
-                {flowSteps.map(([n,t,d,s])=><div className={`flow-row ${s}`} key={n}><i>{s==="done"?"✓":n}</i><div><strong>{t}</strong><span>{d}</span></div><b>{s==="current"?"进行中":s==="done"?"已完成":"待开始"}</b></div>)}
-              </div>
+            <section className="task-center-hero">
+              <div><span className="hero-label">当前项目 · {activeProject?.name || "默认研发项目"} <button className="project-inline-add" onClick={() => setProjectModalOpen(true)}>＋新增项目</button></span><h2>今天要推进哪项研发任务？</h2><p>{activeProject?.description || "把论文、研发文件和成果材料集中到一个项目里，Agent 会帮你持续推进。"}</p><div className="hero-actions"><button className="primary" onClick={() => setView("discover")}>搜索论文 <span>→</span></button><button className="chat-launch" onClick={() => { setLayoutMode("agent"); setChatOpen(false); setChatMinimized(false); }}>与 Agent 对话 <span>✦</span></button><button className="secondary" onClick={() => { setView("library"); setTimeout(() => fileRef.current?.click(), 0); }}>导入研发文件</button></div></div>
+              <div className="task-center-summary"><div><span>当前闭环</span><strong>{flowSteps.filter(([, , , status]) => status === "done").length}/4</strong><small>个阶段已完成</small></div><div><span>待我处理</span><strong>{todoItems.length}</strong><small>项待办任务</small></div></div>
             </section>
-            <section className="stats">
-              <article><span>累计发现</span><strong>{stats.discovered}</strong><small>篇论文</small></article>
-              <article className="stat-action" onClick={() => setView("review")}><span>待审核</span><strong>{stats.pending}</strong><small>项任务 · 点击查看</small></article>
-              <article><span>知识资产</span><strong>{stats.approved + stats.documents}</strong><small>份资料</small></article>
-              <article><span>申报草稿</span><strong>{stats.drafts}</strong><small>份材料</small></article>
+            <section className="task-center-grid">
+              <div className="panel task-panel"><div className="panel-head"><div><p className="eyebrow">MY TASKS</p><h3>待我处理</h3></div><span className="count-badge">{todoItems.length}</span></div>{todoItems.length ? <div className="todo-list">{todoItems.map((item) => <button className="todo-item" key={item.key} onClick={() => { if (item.key === "review") setView("review"); else if (item.key === "draft") setView("ip"); else if (item.key === "resume") setLayoutMode("agent"); else setLayoutMode("agent"); }}><i>{item.key === "review" ? "⌕" : item.key === "draft" ? "◇" : "✦"}</i><span><strong>{item.label}</strong><small>{item.detail}</small></span><b>{item.action} →</b></button>)}</div> : <EmptyState title="暂时没有待处理任务" detail="你可以从搜索论文或导入研发文件开始。" />}</div>
+              <div className="panel task-panel"><div className="panel-head"><div><p className="eyebrow">QUICK START</p><h3>快速开始</h3></div></div><div className="quick-start-list"><button onClick={() => setView("discover")}><i>01</i><span><strong>搜索论文</strong><small>从技术主题发现外部研究证据</small></span><b>→</b></button><button onClick={() => { setView("library"); setTimeout(() => fileRef.current?.click(), 0); }}><i>02</i><span><strong>导入研发文件</strong><small>让 Agent 先读懂方案再制定 Plan</small></span><b>→</b></button><button onClick={() => setView("ip")}><i>03</i><span><strong>生成成果材料</strong><small>把已有资料转成可审核的申报初稿</small></span><b>→</b></button></div></div>
             </section>
-            <section className="content-grid">
-              <div className="panel"><div className="panel-head"><div><p className="eyebrow">LATEST INTELLIGENCE</p><h3>最新知识资产</h3></div><button onClick={() => setView("library")}>查看全部</button></div>{papers.slice(0, 3).map((paper)=><PaperRow paper={paper} key={paper.externalId} />)}</div>
-              <div className="panel action-panel"><p className="eyebrow">QUICK ACTION</p><h3>成果转化</h3><p>选择已入库论文或研发文件，Agent 将生成技术交底书、摘要与权利要求初稿。</p><div className="doc-stack"><span></span><span></span><b>知识产权<br/>申报材料</b></div><button className="secondary" onClick={() => setView("ip")}>开始生成 <span>→</span></button></div>
+            <section className="task-center-lower">
+              <div className="panel"><div className="panel-head"><div><p className="eyebrow">RECENT ASSETS</p><h3>最近打开</h3></div><button onClick={() => setView("library")}>查看资源库</button></div>{papers.slice(0, 3).map((paper) => <PaperRow paper={paper} key={paper.externalId} />)}{!papers.length && !documents.length ? <EmptyState title="还没有研发资产" detail="搜索论文或导入研发文件后，这里会自动显示。" /> : null}</div>
+              <div className="panel flow-panel"><div className="panel-head"><div><p className="eyebrow">WORKFLOW STATUS</p><h3>研发知识闭环</h3></div><button onClick={() => setLayoutMode("agent")}>打开 Agent</button></div><div className="compact-flow">{flowSteps.map(([n, t, d, s]) => <div className={`compact-flow-row ${s}`} key={n}><i>{s === "done" ? "✓" : n}</i><span><strong>{t}</strong><small>{d}</small></span><b>{s === "current" ? "进行中" : s === "done" ? "已完成" : "待开始"}</b></div>)}</div></div>
             </section>
           </>
         )}
@@ -739,9 +781,9 @@ export default function App() {
                 {!approvedPapers.length && !documents.length ? <EmptyState title="暂无可用资料" detail="先审核入库论文或导入研发文件。" /> : null}
                 <button className="primary generate" disabled={loading} onClick={() => void generateDraft()}>{loading ? "Agent 正在生成…" : "生成申报材料"}</button>{loading ? <div className="generation-progress"><div className="progress-track"><i></i></div><strong>{generationStep}</strong><small>展示的是可审计的处理阶段，不暴露模型内部隐式思维。</small></div> : null}
               </div>
-              <div className="draft-preview">{activeDraft ? <><div className="draft-head"><div><small>AI GENERATED DRAFT</small><h3>{activeDraft.title}</h3></div><button onClick={() => downloadDraft(activeDraft)}>下载 Markdown</button></div><pre>{activeDraft.markdown}</pre><p className="disclaimer">AI 初稿仅供内部研讨，提交前须由知识产权专业人员审核。</p></> : <EmptyState title="申报材料预览" detail="选择左侧资料后启动 Agent，生成结果将在此展示。" />}</div>
+              <div className="draft-preview">{activeDraft ? <><div className="draft-head"><div><small>AI GENERATED DRAFT · {stageLabel(draftStages[activeDraft.id] || "ai_draft")}</small><h3>{activeDraft.title}</h3></div><div className="draft-export-actions"><button onClick={() => downloadDraft(activeDraft)}>Markdown</button><button onClick={() => downloadDraftWord(activeDraft)}>Word</button><button onClick={() => printDraft(activeDraft)}>PDF / 打印</button></div></div><div className="draft-review-bar"><label>审核阶段<select value={draftStages[activeDraft.id] || "ai_draft"} onChange={(event) => { const stage = event.target.value as DraftStage; setDraftStages((stages) => ({ ...stages, [activeDraft.id]: stage })); notify(`材料已进入：${stageLabel(stage)}`); }}><option value="ai_draft">AI 初稿</option><option value="rd_review">研发负责人审核</option><option value="ip_review">知识产权审核</option><option value="agency">代理机构修改</option><option value="final">最终定稿</option></select></label><span>{DRAFT_STAGES.find(([value]) => value === (draftStages[activeDraft.id] || "ai_draft"))?.[2]}</span></div><pre>{activeDraft.markdown}</pre><p className="disclaimer">AI 初稿仅供内部研讨；阶段变更保存在当前浏览器，正式版本仍需由知识产权专业人员审核。</p></> : <EmptyState title="申报材料预览" detail="选择左侧资料后启动 Agent，生成结果将在此展示。" />}</div>
             </div>
-            {drafts.length > 0 ? <div className="history"><div className="history-head"><h3>最近生成</h3><select value={draftGroupFilter} onChange={(event) => setDraftGroupFilter(event.target.value)}><option>全部分组</option>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select></div>{visibleDrafts.slice(0, 8).map((draft) => <div className="history-row" key={draft.id}><button onClick={() => setActiveDraft(draft)}><span>{draft.title}</span><small>{draft.groupName || "未分类"} · {formatDate(draft.createdAt)}</small></button><select value={draft.groupName || "未分类"} onChange={(event) => void changeGroup("draft", draft.id, event.target.value)}>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost danger compact-delete" onClick={() => void deleteDraft(draft.id, draft.title)}>删除</button></div>)}</div> : null}
+            {drafts.length > 0 ? <div className="history"><div className="history-head"><div><h3>最近生成</h3><small>材料审核阶段与版本导出</small></div><select value={draftGroupFilter} onChange={(event) => setDraftGroupFilter(event.target.value)}><option>全部分组</option>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select></div>{visibleDrafts.slice(0, 8).map((draft) => <div className="history-row" key={draft.id}><button onClick={() => setActiveDraft(draft)}><span>{draft.title}</span><small>{draft.groupName || "未分类"} · {stageLabel(draftStages[draft.id] || "ai_draft")} · {formatDate(draft.createdAt)}</small></button><select value={draftStages[draft.id] || "ai_draft"} onChange={(event) => setDraftStages((stages) => ({ ...stages, [draft.id]: event.target.value as DraftStage }))}><option value="ai_draft">AI 初稿</option><option value="rd_review">研发审核</option><option value="ip_review">知识产权审核</option><option value="agency">代理机构</option><option value="final">最终定稿</option></select><select value={draft.groupName || "未分类"} onChange={(event) => void changeGroup("draft", draft.id, event.target.value)}>{GROUPS.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost danger compact-delete" onClick={() => void deleteDraft(draft.id, draft.title)}>删除</button></div>)}</div> : null}
           </section>
         )}
 
@@ -755,7 +797,7 @@ export default function App() {
             <aside className="agent-context-column">
               <div className="context-section"><div className="context-title"><span>当前项目</span><button onClick={renameProject}>编辑</button></div><strong>{activeProject?.name || "默认研发项目"}</strong><p>{activeProject?.description || "尚未填写项目说明"}</p></div>
               <div className="context-section"><div className="context-title"><span>执行计划</span><b>{workflowStage || (workflowPlan ? "待确认" : "等待输入")}</b></div><div className="mini-timeline"><div className="mini-step active"><i>1</i><span>理解任务</span></div><div className={`mini-step ${workflowPlan ? "active" : ""}`}><i>2</i><span>制定 Plan</span></div><div className={`mini-step ${searchResults.length ? "active" : ""}`}><i>3</i><span>检索与审核</span></div><div className={`mini-step ${activeDraft ? "active" : ""}`}><i>4</i><span>沉淀成果</span></div></div></div>
-              <div className="context-section"><div className="context-title"><span>Skill 调用</span><button onClick={() => notify("Skill 配置将在下一版开放")}>管理</button></div><div className="skill-list">{agentSkills.map(([name, status, state]) => <div className="skill-row" key={name}><i className={state}>{state === "done" ? "✓" : state === "current" ? "·" : "○"}</i><span>{name}</span><small>{status}</small></div>)}</div></div>
+              <div className="context-section"><div className="context-title"><span>Skill 调用</span><button onClick={() => notify("可点击任一 Skill 查看输入、输出和重跑入口")}>说明</button></div><div className="skill-list">{agentSkills.map(([name, status, state]) => <div className="skill-item" key={name}><button className="skill-row" onClick={() => setSkillDetail(skillDetail === name ? null : name)}><i className={state}>{state === "done" ? "✓" : state === "current" ? "·" : "○"}</i><span>{name}</span><small>{status}</small><b>{skillDetail === name ? "⌃" : "⌄"}</b></button>{skillDetail === name ? <div className="skill-detail"><p><strong>输入：</strong>{name.includes("论文") ? "当前项目主题、研发文件摘要、检索结果" : "当前项目上下文与上一步 Skill 输出"}</p><p><strong>输出：</strong>{name.includes("生成") ? "技术交底书、摘要、权利要求建议" : name.includes("检索") ? "论文候选、来源和相关性依据" : "结构化技术事实与可追溯证据"}</p><div><small>状态：{status} · 模型：{aiConfig.enabled ? aiConfig.model : "平台默认"}</small><button className="ghost" onClick={() => void sendChat(`重新执行${name}，并说明本次输入和筛选依据`)}>重新执行</button></div></div> : null}</div>)}</div></div>
               <div className="context-section reasoning-section"><div className="context-title"><span>AI 分析步骤</span><b>{reasoningTrace.some((step) => step.status === "active") ? "进行中" : "可追溯"}</b></div><ReasoningTrace steps={reasoningTrace} /></div>
               <div className="context-section"><div className="context-title"><span>证据链</span><b>{workflowPlan?.evidenceMap.length || 0} 条</b></div>{workflowPlan?.evidenceMap.length ? workflowPlan.evidenceMap.slice(0, 2).map((item) => <div className="context-evidence" key={item.evidence}><strong>{item.evidence}</strong><span>→ {item.researchDirection}</span></div>) : <p className="context-empty">上传研发文件或选中论文后，Agent 会在这里展示证据关联。</p>}</div>
               <div className="context-section"><div className="context-title"><span>任务产物</span><button onClick={() => { setLayoutMode("dashboard"); setView("library"); }}>查看资源库</button></div><div className="artifact-list">{workflowFile ? <button onClick={() => notify(`当前文件：${workflowFile.name}`)}><i>PDF</i><span>{workflowFile.name}<small>研发文件</small></span></button> : null}{workflowCandidates.length ? <button onClick={() => { setLayoutMode("dashboard"); setView("discover"); }}><i>论文</i><span>{workflowCandidates.length} 篇候选论文<small>Agent 初筛结果</small></span></button> : null}{activeDraft ? <button onClick={() => { setLayoutMode("dashboard"); setView("ip"); }}><i>IP</i><span>{activeDraft.title}<small>知识产权材料</small></span></button> : null}{!workflowFile && !workflowCandidates.length && !activeDraft ? <p className="context-empty">完成任务后，文件、论文和材料会出现在这里。</p> : null}</div></div>
@@ -777,6 +819,8 @@ export default function App() {
       {settingsOpen ? <div className="settings-backdrop" onClick={() => setSettingsOpen(false)}><section className="settings-modal" onClick={(event) => event.stopPropagation()}><div className="settings-head"><div><p className="eyebrow">WORKSPACE SETTINGS</p><h2>工作台设置</h2><p>切换界面风格、主题和 Agent 接入方式。</p></div><button className="settings-close" onClick={() => setSettingsOpen(false)}>×</button></div><div className="settings-content"><section className="settings-section"><h3>界面风格</h3><div className="preset-grid"><button className={uiPreset === "classic" ? "selected" : ""} onClick={() => choosePreset("classic")}><span className="preset-preview classic-preview"><i></i><b></b></span><strong>经典研知</strong><small>原始深绿侧栏与研发后台风格</small></button><button className={uiPreset === "cloudflare" ? "selected" : ""} onClick={() => choosePreset("cloudflare")}><span className="preset-preview cloudflare-preview"><i></i><b></b><em></em></span><strong>Cloudflare 风格</strong><small>白色 Dashboard + 橙色 AI 入口</small></button><button className={uiPreset === "gpt" ? "selected" : ""} onClick={() => choosePreset("gpt")}><span className="preset-preview gpt-preview"><i></i><b></b></span><strong>GPT 工作台</strong><small>中间对话 + 右侧上下文和任务</small></button></div></section><section className="settings-section"><h3>外观主题</h3><div className="theme-options">{([["system", "跟随系统", "自动适配白天/夜晚"], ["light", "浅色模式", "清晰的研发后台界面"], ["dark", "深色模式", "适合夜间长时间使用"]] as Array<[ThemePreference, string, string]>).map(([value, label, detail]) => <button className={themePreference === value ? "selected" : ""} key={value} onClick={() => setThemePreference(value)}><span>{value === "system" ? "◐" : value === "light" ? "☼" : "☾"}</span><strong>{label}</strong><small>{detail}</small></button>)}</div></section><section className="settings-section"><div className="settings-section-title"><div><h3>AI 模型接入</h3><p>可配置自己的 GLM 或 OpenAI 兼容接口。</p></div><label className="switch-row"><input type="checkbox" checked={aiConfig.enabled} onChange={(event) => setAIConfig((config) => ({ ...config, enabled: event.target.checked }))} /><span>启用自定义配置</span></label></div><div className="settings-form"><label>服务类型<select value={aiConfig.provider} onChange={(event) => setAIConfig((config) => ({ ...config, provider: event.target.value as AIProvider }))}><option value="glm">智谱 GLM 官方接口</option><option value="openai-compatible">OpenAI 兼容接口</option><option value="k3">本地 K3 / 自定义接口</option></select></label><label>接口地址<input value={aiConfig.endpoint} onChange={(event) => setAIConfig((config) => ({ ...config, endpoint: event.target.value }))} placeholder="https://open.bigmodel.cn/api/paas/v4" /></label><label>模型名称<input value={aiConfig.model} onChange={(event) => setAIConfig((config) => ({ ...config, model: event.target.value }))} placeholder="glm-5.3" /></label><label>API Key<input type="password" value={aiConfig.apiKey} onChange={(event) => setAIConfig((config) => ({ ...config, apiKey: event.target.value }))} placeholder="输入你自己的 API Key" /></label></div><label className="remember-key"><input type="checkbox" checked={aiConfig.remember} onChange={(event) => setAIConfig((config) => ({ ...config, remember: event.target.checked }))} />在本机浏览器保存配置（不写入代码）</label><p className="settings-security">安全提示：启用后，API Key 会随 AI 请求发送到当前项目 Worker。演示环境建议使用专用低额度 Key，不要填写生产主 Key。</p></section></div><div className="settings-actions"><button className="ghost" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary" onClick={saveAISettings}>保存设置</button></div></section></div> : null}
       {projectModalOpen ? <div className="modal-backdrop" onClick={() => setProjectModalOpen(false)}><div className="project-modal" onClick={(event) => event.stopPropagation()}><p className="eyebrow">NEW PROJECT</p><h2>新增研发项目</h2><p>项目之间的论文、研发文件、审核任务和申报材料相互隔离。</p><label>项目名称<input autoFocus value={projectForm.name} onChange={(event) => setProjectForm((form) => ({ ...form, name: event.target.value }))} placeholder="例如：工业视觉缺陷检测" /></label><label>项目介绍<textarea value={projectForm.description} onChange={(event) => setProjectForm((form) => ({ ...form, description: event.target.value }))} placeholder="描述研发目标、范围或负责人关注点" rows={4} /></label><div className="project-modal-actions"><button className="ghost" onClick={() => setProjectModalOpen(false)}>取消</button><button className="primary" onClick={() => void saveProject()}>创建并进入</button></div></div></div> : null}
       {!accessCode || codeInput ? <div className="modal-backdrop"><div className="access-modal"><span className="seal">研</span><p className="eyebrow">SECURE DEMO</p><h2>进入研知 Agent</h2><p>请输入演示访问码。它只保存在当前浏览器会话中，用于保护 AI 调用额度。</p><input autoFocus value={codeInput} onChange={(event) => { setCodeInput(event.target.value); setAuthError(""); }} onKeyDown={(event) => event.key === "Enter" && void unlock()} placeholder="演示访问码" type="password" />{authError ? <div className="form-error">{authError}</div> : null}<button className="primary" disabled={loading} onClick={() => void unlock()}>{loading ? "正在验证…" : "进入工作台"}</button>{accessCode ? <button className="text-button" onClick={() => setCodeInput("")}>取消</button> : null}</div></div> : null}
+      {settingsOpen ? <button className="settings-feishu-tab" onClick={() => setFeishuDemoOpen(true)}>⚙ 集成中心 · 飞书</button> : null}
+      {feishuDemoOpen ? <div className="modal-backdrop" onClick={() => setFeishuDemoOpen(false)}><section className="feishu-modal" onClick={(event) => event.stopPropagation()}><div className="settings-head"><div><p className="eyebrow">INTEGRATION CENTER · DEMO</p><h2>飞书研发协同</h2><p>演示模块：展示未来如何连接飞书文档、群通知和审批流。</p></div><button className="settings-close" onClick={() => setFeishuDemoOpen(false)}>×</button></div><div className="feishu-status"><span className="demo-badge">演示模式</span><strong>未连接真实飞书应用</strong><small>当前配置只保存在浏览器本地，不会发送到任何服务。</small></div><div className="feishu-capability-grid"><div>✓ 飞书文档同步<small>研发文件进入当前项目资源库</small></div><div>✓ Agent 任务通知<small>Plan、失败和完成结果提醒</small></div><div>✓ 审批提醒<small>论文审核与材料定稿提醒负责人</small></div><div>✓ 组织权限映射<small>按飞书成员同步项目访问范围</small></div></div><div className="settings-form feishu-form"><label>App ID<input value={feishuConfig.appId} onChange={(event) => setFeishuConfig((config) => ({ ...config, appId: event.target.value }))} placeholder="cli_xxxxxxxxx" /></label><label>App Secret<input type="password" value={feishuConfig.appSecret} onChange={(event) => setFeishuConfig((config) => ({ ...config, appSecret: event.target.value }))} placeholder="演示占位，不会提交" /></label><label>租户 / 团队<input value={feishuConfig.tenant} onChange={(event) => setFeishuConfig((config) => ({ ...config, tenant: event.target.value }))} placeholder="研发中心" /></label><label>默认同步空间<input value={feishuConfig.space} onChange={(event) => setFeishuConfig((config) => ({ ...config, space: event.target.value }))} /></label></div><div className="feishu-switches"><label><input type="checkbox" checked={feishuConfig.syncFiles} onChange={(event) => setFeishuConfig((config) => ({ ...config, syncFiles: event.target.checked }))} />同步研发文件</label><label><input type="checkbox" checked={feishuConfig.notify} onChange={(event) => setFeishuConfig((config) => ({ ...config, notify: event.target.checked }))} />发送任务通知</label><label><input type="checkbox" checked={feishuConfig.approval} onChange={(event) => setFeishuConfig((config) => ({ ...config, approval: event.target.checked }))} />发送审批提醒</label></div><div className="feishu-flow"><span>飞书研发群</span><i>→</i><span>上传文件</span><i>→</i><span>Agent Plan</span><i>→</i><span>负责人确认</span><i>→</i><span>材料审批</span></div><div className="settings-actions"><button className="ghost" onClick={() => setFeishuDemoOpen(false)}>关闭</button><button className="primary" onClick={() => { setFeishuDemoOpen(false); notify("已保存飞书演示配置；真实接入需配置飞书应用凭据"); }}>保存演示配置</button></div></section></div> : null}
       {message ? <div className="toast">{message}</div> : null}
     </div>
   );
