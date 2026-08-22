@@ -56,7 +56,8 @@ function chatEndpoint(endpoint: string) {
 
 function responseHeaders(request: Request, env: Env) {
   const origin = request.headers.get("origin") || "";
-  const allowed = origin === env.ALLOWED_ORIGIN || /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin);
+  const allowedPagesPreview = /^https:\/\/[a-z0-9-]+\.fc-rd-knowledge-agent\.pages\.dev$/.test(origin);
+  const allowed = origin === env.ALLOWED_ORIGIN || allowedPagesPreview || /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin);
   return {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": allowed ? origin : env.ALLOWED_ORIGIN,
