@@ -103,11 +103,9 @@ export default function App() {
   const [libraryGroup, setLibraryGroup] = useState("全部分组");
   const [draftGroupFilter, setDraftGroupFilter] = useState("全部分组");
   const [customGroups, setCustomGroups] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem("rd-custom-groups") || "[]") as string[]; } catch { return []; } });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("rd-sidebar-collapsed") === "1");
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMinimized, setChatMinimized] = useState(false);
-  const [chatPosition, setChatPosition] = useState<{ left: number; top: number } | null>(null);
-  const [chatNormalPosition, setChatNormalPosition] = useState<{ left: number; top: number } | null>(null);
-  const [chatDragging, setChatDragging] = useState<{ offsetX: number; offsetY: number } | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [workflowPlan, setWorkflowPlan] = useState<WorkflowPlan | null>(null);
@@ -121,7 +119,6 @@ export default function App() {
   const [k3Ready, setK3Ready] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const chatFileRef = useRef<HTMLInputElement>(null);
-  const chatWindowRef = useRef<HTMLElement>(null);
 
   const api = useCallback(async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
     const target = new URL(`${API_BASE}${path}`);
@@ -170,23 +167,8 @@ export default function App() {
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => { localStorage.setItem("rd-custom-groups", JSON.stringify(customGroups)); }, [customGroups]);
   useEffect(() => { localStorage.setItem("rd-active-project", String(activeProjectId)); }, [activeProjectId]);
+  useEffect(() => { localStorage.setItem("rd-sidebar-collapsed", sidebarCollapsed ? "1" : "0"); }, [sidebarCollapsed]);
   useEffect(() => { sessionStorage.setItem("rd-agent-chat", JSON.stringify(chatMessages.slice(-20))); }, [chatMessages]);
-
-  useEffect(() => {
-    if (!chatDragging) return;
-    const move = (event: PointerEvent) => {
-      const width = chatWindowRef.current?.getBoundingClientRect().width || 390;
-      const height = chatWindowRef.current?.getBoundingClientRect().height || 210;
-      setChatPosition({
-        left: Math.max(8, Math.min(window.innerWidth - width - 8, event.clientX - chatDragging.offsetX)),
-        top: Math.max(8, Math.min(window.innerHeight - height - 8, event.clientY - chatDragging.offsetY)),
-      });
-    };
-    const stop = () => setChatDragging(null);
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", stop, { once: true });
-    return () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); };
-  }, [chatDragging]);
 
   useEffect(() => {
     if (!IS_LOCAL_DEMO) return;
@@ -332,11 +314,12 @@ export default function App() {
   }
 
   function chatContext() {
-    return `当前页面：${view}；当前检索词：${query}；候选论文数量：${searchResults.length}；已入库论文数量：${approvedPapers.length}；已导入研发文件数量：${documents.length}。具体论文或文件内容只有在用户主动粘贴到对话框后才会发送。`;
+    const context = ({ dashboard: "研发工作台", discover: "论文雷达", review: "审核中心", library: "研发知识库", ip: "知识产权材料" } as Record<View, string>)[view];
+    return `当前上下文：${context}；当前项目：${activeProject?.name || "默认研发项目"}；当前检索词：${query}；检索结果：${searchResults.length} 篇；待审核论文：${pendingPapers.length} 篇；已入库论文：${approvedPapers.length} 篇；研发文件：${documents.length} 份；知识产权草稿：${drafts.length} 份。具体论文或文件内容只有在用户主动粘贴到对话框后才会发送。`;
   }
 
-  async function sendChat() {
-    const content = chatInput.trim();
+  async function sendChat(contentOverride?: string) {
+    const content = (contentOverride ?? chatInput).trim();
     if (!content || chatBusy) return;
     const nextMessages = [...chatMessages, { role: "user" as const, content }];
     setChatMessages(nextMessages);
@@ -429,26 +412,8 @@ export default function App() {
     } finally { setChatBusy(false); }
   }
 
-  function startChatDrag(event: React.PointerEvent<HTMLElement>) {
-    if ((event.target as HTMLElement).closest("button")) return;
-    const rect = chatWindowRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    setChatPosition({ left: rect.left, top: rect.top });
-    setChatDragging({ offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top });
-  }
-
   function toggleChatMinimized() {
-    const rect = chatWindowRef.current?.getBoundingClientRect();
-    if (!chatMinimized) {
-      if (rect) setChatNormalPosition({ left: rect.left, top: rect.top });
-      const width = 260;
-      setChatPosition({ left: Math.max(8, window.innerWidth - width - 16), top: Math.max(8, window.innerHeight - 58) });
-      setChatMinimized(true);
-    } else {
-      setChatPosition(chatNormalPosition);
-      setChatMinimized(false);
-    }
+    setChatMinimized((value) => !value);
   }
 
   async function previewDocument(id: number) {
@@ -554,35 +519,44 @@ export default function App() {
   }, [stats]);
   const pendingPapers = useMemo(() => papers.filter((paper) => paper.status === "pending"), [papers]);
 
+  const pageTitle = ({ dashboard: "AI 工作台", discover: "论文雷达", review: "审核中心", library: "资源库", ip: "成果材料" } as Record<View, string>)[view];
+  const quickPrompts = view === "discover"
+    ? ["分析当前论文结果", "筛选最相关的 10 篇", "找出与当前研发方向最接近的论文"]
+    : view === "library"
+      ? ["总结当前资源库", "找出可以转化为专利的创新点", "查看最近导入的研发文件"]
+      : view === "ip"
+        ? ["检查当前材料是否完整", "补充权利要求书建议", "优化技术方案和有益效果"]
+        : ["如何开始研发知识闭环？", "上传研发文件并制定 Plan", "搜索工业视觉相关论文"];
+
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand"><span>研</span><div><strong>研知 Agent</strong><small>R&D Intelligence</small></div></div>
+    <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${chatOpen ? " assistant-open" : ""}${chatOpen && chatMinimized ? " assistant-minimized" : ""}`}>
+      <aside className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`}>
+        <div className="brand"><span>研</span><div><strong>研知 Agent</strong><small>R&D Intelligence</small></div><button className="sidebar-collapse" onClick={() => setSidebarCollapsed((value) => !value)} title={sidebarCollapsed ? "展开导航" : "折叠导航"}>{sidebarCollapsed ? "›" : "‹"}</button></div>
         <nav>
           {[
-            ["dashboard", "⌂", "工作台"],
+            ["dashboard", "✦", "AI 工作台"],
             ["discover", "⌕", "论文雷达"],
-            ["review", "✓", "审核中心"],
-            ["library", "▤", "研发知识库"],
-            ["ip", "◇", "知识产权"],
+            ["library", "▤", "资源库"],
+            ["ip", "◇", "成果材料"],
           ].map(([key, icon, label]) => (
             <button className={view === key ? "active" : ""} key={key} onClick={() => setView(key as View)}>
-              {icon}<span>{label}</span>{key === "review" && pendingPapers.length > 0 ? <em>{pendingPapers.length}</em> : null}
+              <b>{icon}</b><span>{label}</span>{key === "library" && pendingPapers.length > 0 ? <em>{pendingPapers.length}</em> : null}
             </button>
           ))}
         </nav>
-        <div className="sidebar-note"><b>LIVE DEMO</b><p>双源检索、人工审核、研发知识沉淀与成果转化。</p></div>
+        {!sidebarCollapsed ? <div className="sidebar-note"><b>AI COPILOT</b><p>在论文、文件和成果材料页面，随时打开右侧 Agent。</p></div> : null}
       </aside>
       <main>
         <header>
-          <div><p className="eyebrow">研发知识与成果转化中心</p><h1>{view === "dashboard" ? "早上好，研发负责人" : ({ discover: "论文雷达", review: "审核中心", library: "研发知识库", ip: "知识产权材料" } as Record<string, string>)[view]}</h1></div>
-          <div className="top-actions"><div className="project-switcher"><select value={activeProjectId} onChange={(event) => switchProject(Number(event.target.value))}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><button onClick={renameProject} title="编辑当前项目">编辑</button><button onClick={() => setProjectModalOpen(true)} title="新增项目">＋项目</button></div><span className={connected ? "live-dot" : "live-dot offline"}>{connected ? "Agent 在线" : "等待访问码"}</span><button className="avatar" onClick={() => setCodeInput(accessCode)}>FC</button></div>
+          <div className="header-title"><p className="eyebrow">研发知识与成果转化中心</p><h1>{pageTitle}</h1></div>
+          <div className="global-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { setView("discover"); void searchPapers(); } }} placeholder="搜索论文、研发文件或知识产权材料" /><kbd>Ctrl K</kbd></div>
+          <div className="top-actions"><div className="project-switcher"><select value={activeProjectId} onChange={(event) => switchProject(Number(event.target.value))}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><button onClick={renameProject} title="编辑当前项目">编辑</button></div><button className={`ai-trigger${chatOpen ? " active" : ""}`} onClick={() => { setChatOpen((value) => !value); setChatMinimized(false); }}><span>✦</span> AI 助手</button><span className={connected ? "live-dot" : "live-dot offline"}>{connected ? "在线" : "离线"}</span><button className="avatar" onClick={() => setCodeInput(accessCode)}>FC</button></div>
         </header>
 
         {view === "dashboard" && (
           <>
             <section className="hero">
-              <div><span className="hero-label">当前项目 · {activeProject?.name || "默认研发项目"} <button className="project-inline-add" onClick={() => setProjectModalOpen(true)}>＋新增项目</button></span><h2>把分散的研究，<br/>变成可沉淀的创新资产。</h2><p>{activeProject?.description || "自动发现论文、审核入库，再从研发资料生成知识产权材料初稿。"}</p><div className="hero-actions"><button className="primary" onClick={() => setView("discover")}>启动论文采集 <span>→</span></button><button className="chat-launch" onClick={() => setChatOpen(true)}>与 Agent 对话 <span>⌁</span></button></div></div>
+              <div><span className="hero-label">当前项目 · {activeProject?.name || "默认研发项目"} <button className="project-inline-add" onClick={() => setProjectModalOpen(true)}>＋新增项目</button></span><h2>从搜索开始，<br/>让 Agent 参与每一步研发。</h2><p>{activeProject?.description || "先搜索论文或导入研发文件，右侧 Agent 会根据当前页面提供下一步建议。"}</p><div className="hero-actions"><button className="primary" onClick={() => setView("discover")}>开始搜索 <span>→</span></button><button className="chat-launch" onClick={() => { setChatOpen(true); setChatMinimized(false); }}>打开 AI 助手 <span>✦</span></button></div></div>
               <div className="flow-card">
                 <div className="flow-head"><span>研发知识闭环</span><b>真实流程</b></div>
                 {flowSteps.map(([n,t,d,s])=><div className={`flow-row ${s}`} key={n}><i>{s==="done"?"✓":n}</i><div><strong>{t}</strong><span>{d}</span></div><b>{s==="current"?"进行中":s==="done"?"已完成":"待开始"}</b></div>)}
@@ -590,7 +564,7 @@ export default function App() {
             </section>
             <section className="stats">
               <article><span>累计发现</span><strong>{stats.discovered}</strong><small>篇论文</small></article>
-              <article><span>待审核</span><strong>{stats.pending}</strong><small>项任务</small></article>
+              <article className="stat-action" onClick={() => setView("review")}><span>待审核</span><strong>{stats.pending}</strong><small>项任务 · 点击查看</small></article>
               <article><span>知识资产</span><strong>{stats.approved + stats.documents}</strong><small>份资料</small></article>
               <article><span>申报草稿</span><strong>{stats.drafts}</strong><small>份材料</small></article>
             </section>
@@ -620,7 +594,7 @@ export default function App() {
         {view === "library" && (
           <section className="workspace">
             <div className="workspace-head"><div><p className="eyebrow">R&D KNOWLEDGE BASE</p><h2>研发知识库</h2><p>论文与研发文档统一沉淀，为成果转化提供可信上下文。</p></div><><input ref={fileRef} hidden type="file" accept=".pdf,.docx" onChange={(event) => void uploadDocument(event.target.files?.[0])} /><button className="primary" disabled={loading} onClick={() => fileRef.current?.click()}>导入 PDF / DOCX</button></></div>
-            <div className="library-toolbar"><label>当前分组<select value={libraryGroup} onChange={(event) => setLibraryGroup(event.target.value)}><option>全部分组</option>{allGroups.map((group) => <option key={group}>{group}</option>)}</select></label><button className="ghost" onClick={createCustomGroup}>+ 新建分组</button><span>已入库论文 {approvedPapers.length} 篇</span></div>
+            <div className="library-toolbar"><label>当前分组<select value={libraryGroup} onChange={(event) => setLibraryGroup(event.target.value)}><option>全部分组</option>{allGroups.map((group) => <option key={group}>{group}</option>)}</select></label><button className="ghost" onClick={createCustomGroup}>+ 新建分组</button><button className="ghost" onClick={() => setView("review")}>待审核 {pendingPapers.length}</button><span>已入库论文 {approvedPapers.length} 篇</span></div>
             <div className="library-columns"><div><h3>已入库论文 <span>{visibleApprovedPapers.length}</span></h3>{visibleApprovedPapers.length ? visibleApprovedPapers.map((paper) => <div className="library-item" key={paper.externalId}><PaperRow paper={paper} onPreview={() => previewPaper(paper)} /><div className="item-actions"><select value={paper.groupName || "未分类"} onChange={(event) => void changeGroup("paper", paper.id!, event.target.value)}>{allGroups.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost" onClick={() => previewPaper(paper)}>在线预览</button><button className="ghost danger" onClick={() => void deletePaper(paper.id!, paper.title)}>删除</button></div></div>) : <EmptyState title="暂无已入库论文" detail="先在审核中心通过一篇论文。" />}</div><div><h3>研发文件 <span>{visibleDocuments.length}</span></h3>{visibleDocuments.length ? visibleDocuments.map((doc) => <div className="doc-row" key={doc.id}><i>DOC</i><div><strong>{doc.name}</strong><p>{Math.round(doc.size / 1024)} KB · {formatDate(doc.createdAt)} · {doc.groupName || "未分类"}</p></div><select value={doc.groupName || "未分类"} onChange={(event) => void changeGroup("document", doc.id, event.target.value)}>{allGroups.map((group) => <option key={group}>{group}</option>)}</select><button className="ghost" onClick={() => void previewDocument(doc.id)}>预览</button><button className="ghost danger" onClick={() => void deleteDocument(doc.id, doc.name)}>删除</button></div>) : <EmptyState title="尚未导入研发文件" detail="文件在浏览器本地解析，原文件不会上传。" />}</div></div>
           </section>
         )}
@@ -641,7 +615,15 @@ export default function App() {
         )}
       </main>
 
-      {chatOpen ? <aside ref={chatWindowRef} style={chatPosition ? { left: chatPosition.left, top: chatPosition.top, right: "auto", bottom: "auto" } : undefined} className={`chat-window${chatMinimized ? " minimized" : ""}`}><div className="chat-head" onPointerDown={startChatDrag}><div><p className="eyebrow">RESEARCH COPILOT</p><strong>与研知 Agent 对话</strong><small>{chatMinimized ? "点击恢复对话 · 可拖动" : "会话会持续到本次浏览器会话结束 · 可拖动"}</small></div><div className="chat-window-actions"><button title={chatMinimized ? "恢复" : "最小化"} onClick={toggleChatMinimized}>{chatMinimized ? "□" : "—"}</button><button title="关闭" onClick={() => setChatOpen(false)}>×</button></div></div>{!chatMinimized ? <><div className="chat-body">{chatMessages.length ? chatMessages.map((item, index) => <div className={`chat-bubble ${item.role}`} key={`${item.role}-${index}`}><p>{item.content}</p>{item.model ? <small>{item.model}</small> : null}</div>) : <div className="chat-welcome"><strong>先从研究方向开始</strong><p>导入 PDF/DOCX 后，Agent 会先给出 Workflow Plan，确认后再自动搜索、初审和转化。</p></div>}{workflowStage ? <div className="workflow-status">{workflowStage}</div> : null}{workflowPlan ? <div className="workflow-card"><strong>Workflow Plan</strong><p>{workflowPlan.summary}</p><small>检索主题：{workflowPlan.searchQueries.join("；")}</small><ul>{workflowPlan.steps.map((step) => <li key={step}>{step}</li>)}</ul><small>分析摘要：{workflowPlan.analysisSummary.join("；")}</small><small>筛选标准：{workflowPlan.screeningCriteria.join("；")}</small>{workflowPlan.evidenceMap.slice(0, 3).map((item) => <div className="evidence-map" key={item.evidence}><b>研发证据：</b>{item.evidence}<br/><b>论文方向：</b>{item.researchDirection}<br/><b>转化价值：</b>{item.ipValue}</div>)}{!workflowCandidates.length ? <div className="workflow-actions"><button className="primary" disabled={chatBusy} onClick={() => void confirmFileWorkflow()}>确认 Plan，开始执行</button><button className="ghost" onClick={() => { setWorkflowPlan(null); setWorkflowFile(null); setWorkflowText(""); }}>取消</button></div> : <><p className="workflow-result">Agent 初筛保留 {workflowCandidates.length} 篇候选论文。</p><div className="workflow-actions"><button className="primary" disabled={chatBusy} onClick={() => void approveAndConvertWorkflow()}>确认入库并完成转化</button><button className="ghost" onClick={() => setWorkflowCandidates([])}>重新确认</button></div></>}</div> : null}{chatBusy ? <div className="chat-bubble assistant typing">Agent 正在处理文件或整理建议…</div> : null}</div><div className="chat-compose"><input ref={chatFileRef} hidden type="file" accept=".pdf,.docx" onChange={(event) => void runFileWorkflow(event.target.files?.[0])} /><button className="chat-upload" disabled={chatBusy} onClick={() => chatFileRef.current?.click()}>导入研发文件</button><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder="讨论论文方向、关键词或转化思路…" rows={2} /><button className="primary" disabled={chatBusy || !chatInput.trim()} onClick={() => void sendChat()}>发送</button></div></> : null}</aside> : null}
+      {chatOpen ? <aside className={`assistant-panel${chatMinimized ? " minimized" : ""}`}>
+        <div className="assistant-panel-head"><div><p className="eyebrow">AI COPILOT</p><strong>研知 Agent</strong><small>当前页面：{pageTitle} · {activeProject?.name || "默认项目"}</small></div><div className="chat-window-actions"><button title={chatMinimized ? "展开 AI 面板" : "折叠 AI 面板"} onClick={toggleChatMinimized}>{chatMinimized ? "‹" : "›"}</button><button title="关闭 AI 面板" onClick={() => setChatOpen(false)}>×</button></div></div>
+        {!chatMinimized ? <>
+          <div className="assistant-context"><span>当前上下文</span><strong>{view === "discover" ? `论文检索结果 ${searchResults.length} 篇` : view === "library" ? `资源库 ${approvedPapers.length + documents.length} 项` : view === "ip" ? "成果材料工作区" : "研发知识工作台"}</strong><small>Agent 会根据当前页面和项目状态给出建议</small></div>
+          <div className="assistant-quick"><span>快捷操作</span><div>{quickPrompts.map((prompt) => <button key={prompt} disabled={chatBusy} onClick={() => void sendChat(prompt)}>✦ {prompt}</button>)}</div></div>
+          <div className="chat-body">{chatMessages.length ? chatMessages.map((item, index) => <div className={`chat-bubble ${item.role}`} key={`${item.role}-${index}`}><p>{item.content}</p>{item.model ? <small>{item.model}</small> : null}</div>) : <div className="chat-welcome"><strong>你好，我是研知 Agent</strong><p>我会围绕当前页面协助你搜索论文、查看研发文件、审核知识和生成成果材料。</p><div className="welcome-hint">试试说：“帮我分析当前页面”</div></div>}{workflowStage ? <div className="workflow-status">{workflowStage}</div> : null}{workflowPlan ? <div className="workflow-card"><strong>Workflow Plan</strong><p>{workflowPlan.summary}</p><small>检索主题：{workflowPlan.searchQueries.join("；")}</small><ul>{workflowPlan.steps.map((step) => <li key={step}>{step}</li>)}</ul><small>分析摘要：{workflowPlan.analysisSummary.join("；")}</small><small>筛选标准：{workflowPlan.screeningCriteria.join("；")}</small>{workflowPlan.evidenceMap.slice(0, 3).map((item) => <div className="evidence-map" key={item.evidence}><b>研发证据：</b>{item.evidence}<br/><b>论文方向：</b>{item.researchDirection}<br/><b>转化价值：</b>{item.ipValue}</div>)}{!workflowCandidates.length ? <div className="workflow-actions"><button className="primary" disabled={chatBusy} onClick={() => void confirmFileWorkflow()}>确认 Plan，开始执行</button><button className="ghost" onClick={() => { setWorkflowPlan(null); setWorkflowFile(null); setWorkflowText(""); }}>取消</button></div> : <><p className="workflow-result">Agent 初筛保留 {workflowCandidates.length} 篇候选论文。</p><div className="workflow-actions"><button className="primary" disabled={chatBusy} onClick={() => void approveAndConvertWorkflow()}>确认入库并完成转化</button><button className="ghost" onClick={() => setWorkflowCandidates([])}>重新确认</button></div></>}</div> : null}{chatBusy ? <div className="chat-bubble assistant typing">Agent 正在处理文件或整理建议…</div> : null}</div>
+          <div className="chat-compose"><input ref={chatFileRef} hidden type="file" accept=".pdf,.docx" onChange={(event) => void runFileWorkflow(event.target.files?.[0])} /><button className="chat-upload" disabled={chatBusy} onClick={() => chatFileRef.current?.click()}>导入文件</button><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder="询问当前页面的内容…" rows={2} /><button className="primary" disabled={chatBusy || !chatInput.trim()} onClick={() => void sendChat()}>发送</button></div>
+        </> : <button className="assistant-minimized-label" onClick={toggleChatMinimized}>展开 AI 助手</button>}
+      </aside> : null}
       {preview ? <div className="modal-backdrop" onClick={() => setPreview(null)}><div className="preview-modal" onClick={(event) => event.stopPropagation()}><div className="preview-head"><div><p className="eyebrow">ONLINE PREVIEW</p><h2>{preview.title}</h2></div><button className="ghost" onClick={() => setPreview(null)}>关闭</button></div>{preview.kind === "paper" && preview.url ? <a href={preview.url} target="_blank" rel="noreferrer">打开原文 ↗</a> : null}<pre>{preview.content}</pre></div></div> : null}
       {projectModalOpen ? <div className="modal-backdrop" onClick={() => setProjectModalOpen(false)}><div className="project-modal" onClick={(event) => event.stopPropagation()}><p className="eyebrow">NEW PROJECT</p><h2>新增研发项目</h2><p>项目之间的论文、研发文件、审核任务和申报材料相互隔离。</p><label>项目名称<input autoFocus value={projectForm.name} onChange={(event) => setProjectForm((form) => ({ ...form, name: event.target.value }))} placeholder="例如：工业视觉缺陷检测" /></label><label>项目介绍<textarea value={projectForm.description} onChange={(event) => setProjectForm((form) => ({ ...form, description: event.target.value }))} placeholder="描述研发目标、范围或负责人关注点" rows={4} /></label><div className="project-modal-actions"><button className="ghost" onClick={() => setProjectModalOpen(false)}>取消</button><button className="primary" onClick={() => void saveProject()}>创建并进入</button></div></div></div> : null}
       {!accessCode || codeInput ? <div className="modal-backdrop"><div className="access-modal"><span className="seal">研</span><p className="eyebrow">SECURE DEMO</p><h2>进入研知 Agent</h2><p>请输入演示访问码。它只保存在当前浏览器会话中，用于保护 AI 调用额度。</p><input autoFocus value={codeInput} onChange={(event) => { setCodeInput(event.target.value); setAuthError(""); }} onKeyDown={(event) => event.key === "Enter" && void unlock()} placeholder="演示访问码" type="password" />{authError ? <div className="form-error">{authError}</div> : null}<button className="primary" disabled={loading} onClick={() => void unlock()}>{loading ? "正在验证…" : "进入工作台"}</button>{accessCode ? <button className="text-button" onClick={() => setCodeInput("")}>取消</button> : null}</div></div> : null}
