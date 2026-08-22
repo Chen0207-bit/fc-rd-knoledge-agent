@@ -247,13 +247,13 @@ async function generateAssistantReply(env: Env, messages: Array<{ role: "user" |
     const response = await fetch(GLM_API_URL, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${env.GLM_API_KEY}` },
-      body: JSON.stringify({ model: AI_MODEL, messages: payloadMessages, stream: false, max_tokens: 1200, temperature: 0.35 }),
+      body: JSON.stringify({ model: AI_MODEL, messages: payloadMessages, stream: false, max_tokens: 2200, temperature: 0.35 }),
     });
     const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
     const content = result.choices?.[0]?.message?.content || "";
     if (response.ok && content.trim()) return { content, model: AI_MODEL };
   }
-  const fallback = await env.AI.run(FALLBACK_AI_MODEL, { messages: payloadMessages, max_tokens: 1200, temperature: 0.35 });
+  const fallback = await env.AI.run(FALLBACK_AI_MODEL, { messages: payloadMessages, max_tokens: 2200, temperature: 0.35 });
   const content = typeof fallback.response === "string" ? fallback.response : typeof fallback.result === "string" ? fallback.result : "暂时无法生成建议";
   return { content, model: FALLBACK_AI_MODEL };
 }
@@ -302,19 +302,19 @@ const worker = {
         if (sourceText.length < 80) return error(request, env, "研发文件内容不足，无法制定计划");
         const planPrompt = `请为研发文件设计一个可执行的研发知识闭环计划。只输出 JSON，不要 Markdown 代码块，不要输出隐式思维链。
 JSON 字段必须为：
-{"summary":"一句话目标","searchQuery":"英文或中文论文检索主题","screeningCriteria":["论文筛选标准1","论文筛选标准2"],"steps":["步骤1","步骤2","步骤3"]}
-要求：searchQuery 适合 arXiv、Semantic Scholar、Crossref 检索；步骤必须覆盖文件解析、论文搜索、Agent 初审、用户确认入库、知识产权材料生成；不要编造文件中没有的技术事实。
+{"summary":"一句话目标","searchQueries":["检索主题1","检索主题2","检索主题3"],"screeningCriteria":["论文筛选标准1","论文筛选标准2"],"evidenceMap":[{"evidence":"文件中的技术事实或问题","researchDirection":"对应论文研究方向","ipValue":"对方案书的价值"}],"analysisSummary":["基于哪些文件证据确定检索方向","如何判断论文与方案相关"],"steps":["步骤1","步骤2","步骤3"]}
+要求：searchQueries 适合 arXiv、Semantic Scholar、Crossref 检索，至少给出 2 组、最多 4 组互补主题（方法、场景、工程约束、评价指标）；evidenceMap 必须把研发文件证据和论文方向、知识产权价值串起来；步骤必须覆盖文件解析、论文搜索、Agent 初审、用户确认入库、知识产权材料生成；不要编造文件中没有的技术事实。
 项目介绍：${String(body.projectDescription || "").slice(0, 800)}
 文件名：${String(body.fileName || "研发文件")}
 研发文件内容：
 ${sourceText}`;
         const reply = await generateAssistantReply(env, [{ role: "user", content: planPrompt }], "这是一个待用户确认的研发文件 Workflow Plan 生成请求。");
-        let plan: { summary: string; searchQuery: string; screeningCriteria: string[]; steps: string[] };
+        let plan: { summary: string; searchQueries: string[]; screeningCriteria: string[]; evidenceMap: Array<{ evidence: string; researchDirection: string; ipValue: string }>; analysisSummary: string[]; steps: string[] };
         try {
           const normalized = reply.content.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
           plan = JSON.parse(normalized) as typeof plan;
         } catch {
-          plan = { summary: `围绕“${body.fileName || "研发文件"}”完成论文检索、审核入库与知识产权转化`, searchQuery: "research intelligence agent", screeningCriteria: ["与研发主题高度相关", "有明确技术方案或实验依据"], steps: ["解析研发文件并提炼技术主题", "检索并筛选相关论文", "Agent 初审后交由用户确认入库", "生成知识产权申报材料初稿"] };
+          plan = { summary: `围绕“${body.fileName || "研发文件"}”完成论文检索、审核入库与知识产权转化`, searchQueries: ["research intelligence agent", "engineering knowledge extraction", "industrial deployment method"], screeningCriteria: ["与研发主题高度相关", "有明确技术方案或实验依据"], evidenceMap: [{ evidence: "研发文件中的核心技术方案", researchDirection: "相关方法与应用研究", ipValue: "补充背景技术、技术方案和创新点依据" }], analysisSummary: ["从研发文件提取技术对象、方法和工程约束", "通过多主题检索扩展论文覆盖面", "按技术相关性和可引用价值进行初筛"], steps: ["解析研发文件并提炼技术主题", "检索并筛选相关论文", "Agent 初审后交由用户确认入库", "生成知识产权申报材料初稿"] };
         }
         return json(request, env, { plan, model: reply.model });
       }
