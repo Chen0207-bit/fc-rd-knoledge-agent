@@ -6,7 +6,6 @@ import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 type View = "dashboard" | "discover" | "review" | "library" | "ip";
-type LayoutMode = "dashboard" | "agent";
 type UIPreset = "classic" | "cloudflare" | "gpt";
 type ThemePreference = "system" | "light" | "dark";
 type AIProvider = "glm" | "openai-compatible" | "k3";
@@ -21,6 +20,8 @@ type SpeedChoice = "fast" | "balanced" | "deep";
 type ChatMessage = { role: "user" | "assistant"; content: string; model?: string };
 type Project = { id: number; name: string; description: string; createdAt?: string; updatedAt?: string };
 type WorkflowPlan = { summary: string; searchQueries: string[]; screeningCriteria: string[]; evidenceMap: Array<{ evidence: string; researchDirection: string; ipValue: string }>; analysisSummary: string[]; steps: string[]; model?: string };
+type SkillDocument = { id: string; name: string; description: string; content: string; enabled: boolean; source: "built-in" | "uploaded"; updatedAt: string };
+type SkillRun = { id: string; name: string; input: string; output: string; status: "running" | "done" | "error"; startedAt: string; duration?: number };
 type Paper = {
   id?: number;
   source: "arxiv" | "semantic_scholar" | "crossref";
@@ -50,6 +51,21 @@ function readAIConfig(): AIConfig {
 }
 function readResumeTask(): ResumeTask | null {
   try { return JSON.parse(sessionStorage.getItem("rd-resume-task") || "null") as ResumeTask | null; } catch { return null; }
+}
+
+const DEFAULT_SKILLS: SkillDocument[] = [
+  { id: "research-dialogue", name: "研发任务对话 Skill", description: "把自然语言需求转成可执行的研发任务和下一步建议。", content: "# 研发任务对话 Skill\n\n## 目标\n围绕当前项目理解研发人员的问题，给出可执行的检索、审核和转化建议。\n\n## 规则\n- 优先追问缺失的技术对象、场景、约束和评价指标。\n- 输出检索关键词、筛选标准和下一步动作。\n- 不编造论文、实验数据或法律结论。\n", enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
+  { id: "document-parser", name: "研发文件解析 Skill", description: "提取研发文件中的技术对象、方法、工程约束和评价指标。", content: "# 研发文件解析 Skill\n\n## 输入\nPDF 或 DOCX 的文本内容。\n\n## 输出\n技术对象、待解决问题、核心方法、工程约束、评价指标和待补充信息。\n\n## 检查\n保留原文证据，不把推测当成事实。\n", enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
+  { id: "paper-search", name: "论文检索 Skill", description: "根据研发证据拆分互补主题，检索并合并多来源论文。", content: "# 论文检索 Skill\n\n## 检索策略\n至少覆盖方法、应用场景、工程约束和评价指标四类关键词。\n\n## 来源\narXiv、Semantic Scholar、Crossref。\n\n## 输出\n论文标题、来源、摘要、年份、原文链接和去重后的候选集。\n", enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
+  { id: "paper-review", name: "论文相关性审核 Skill", description: "根据技术相关性、证据质量和知识产权价值给出审核建议。", content: "# 论文相关性审核 Skill\n\n## 判断维度\n- 是否解决相近技术问题\n- 技术方案是否可比\n- 是否存在可核验摘要或全文\n- 对背景技术、差异点和创新点是否有价值\n\n## 输出\n建议纳入、建议排除或需要人工确认，并给出依据摘要。\n", enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
+  { id: "ip-drafting", name: "知识产权生成 Skill", description: "将研发文件、论文证据和创新点组织为可审核的技术交底书初稿。", content: "# 知识产权生成 Skill\n\n## 结构\n技术领域、背景技术、现有技术问题、技术方案、有益效果、附图说明、实施方式、摘要和权利要求建议。\n\n## 约束\n每个关键结论都要能回指研发文件或论文证据；缺失信息标记为待确认。\n", enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
+];
+
+function readSkills() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("rd-skill-documents") || "null") as SkillDocument[] | null;
+    return saved?.length ? saved : DEFAULT_SKILLS;
+  } catch { return DEFAULT_SKILLS; }
 }
 
 const API_BASE = (
@@ -111,7 +127,7 @@ async function extractFile(file: File) {
 
 export default function App() {
   const [view, setView] = useState<View>("dashboard");
-  const [layoutMode, setLayoutMode] = useState<LayoutMode>(() => (localStorage.getItem("rd-layout-mode") as LayoutMode) || "dashboard");
+  const [aiFocus, setAIFocus] = useState(false);
   const [uiPreset, setUiPreset] = useState<UIPreset>(() => (localStorage.getItem("rd-ui-preset") as UIPreset) || "cloudflare");
   const [themePreference, setThemePreference] = useState<ThemePreference>(() => (localStorage.getItem("rd-theme-preference") as ThemePreference) || "system");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -161,6 +177,11 @@ export default function App() {
   const [activeDraft, setActiveDraft] = useState<Draft | null>(null);
   const [draftStages, setDraftStages] = useState<Record<number, DraftStage>>(() => { try { return JSON.parse(localStorage.getItem("rd-draft-stages") || "{}") as Record<number, DraftStage>; } catch { return {}; } });
   const [skillDetail, setSkillDetail] = useState<string | null>(null);
+  const [skills, setSkills] = useState<SkillDocument[]>(readSkills);
+  const [skillRuns, setSkillRuns] = useState<SkillRun[]>([]);
+  const [skillLibraryOpen, setSkillLibraryOpen] = useState(false);
+  const [skillEditor, setSkillEditor] = useState<SkillDocument | null>(null);
+  const [planDraft, setPlanDraft] = useState<WorkflowPlan | null>(null);
   const [feishuDemoOpen, setFeishuDemoOpen] = useState(false);
   const [feishuConfig, setFeishuConfig] = useState({ appId: "", appSecret: "", tenant: "", space: "研发知识空间", syncFiles: true, notify: true, approval: true });
   const [k3Ready, setK3Ready] = useState(false);
@@ -215,11 +236,11 @@ export default function App() {
   useEffect(() => { localStorage.setItem("rd-custom-groups", JSON.stringify(customGroups)); }, [customGroups]);
   useEffect(() => { localStorage.setItem("rd-active-project", String(activeProjectId)); }, [activeProjectId]);
   useEffect(() => { localStorage.setItem("rd-sidebar-collapsed", sidebarCollapsed ? "1" : "0"); }, [sidebarCollapsed]);
-  useEffect(() => { localStorage.setItem("rd-layout-mode", layoutMode); }, [layoutMode]);
   useEffect(() => { localStorage.setItem("rd-ui-preset", uiPreset); }, [uiPreset]);
   useEffect(() => { localStorage.setItem("rd-theme-preference", themePreference); }, [themePreference]);
   useEffect(() => { sessionStorage.setItem("rd-agent-chat", JSON.stringify(chatMessages.slice(-20))); }, [chatMessages]);
   useEffect(() => { localStorage.setItem("rd-draft-stages", JSON.stringify(draftStages)); }, [draftStages]);
+  useEffect(() => { localStorage.setItem("rd-skill-documents", JSON.stringify(skills)); }, [skills]);
 
   useEffect(() => {
     if (!IS_LOCAL_DEMO) return;
@@ -254,6 +275,53 @@ export default function App() {
     sessionStorage.removeItem("rd-resume-task");
   }
 
+  function enabledSkillContext() {
+    return skills.filter((skill) => skill.enabled).map((skill) => `### ${skill.name}\n${skill.content.slice(0, 6000)}`).join("\n\n").slice(0, 24_000);
+  }
+
+  function startSkillRun(name: string, input: string) {
+    const run = { id: `${Date.now()}-${name}`, name, input: input.slice(0, 180), output: "正在执行并等待结果…", status: "running" as const, startedAt: new Date().toISOString() };
+    setSkillRuns((runs) => [run, ...runs].slice(0, 8));
+    return run.id;
+  }
+
+  function finishSkillRun(id: string, output: string, error = false) {
+    setSkillRuns((runs) => runs.map((run) => run.id === id ? { ...run, output: output.slice(0, 240), status: error ? "error" : "done", duration: Date.now() - new Date(run.startedAt).getTime() } : run));
+  }
+
+  function openSkillEditor(skill?: SkillDocument) {
+    setSkillEditor(skill ? { ...skill } : { id: `uploaded-${Date.now()}`, name: "新 Skill", description: "", content: "# 新 Skill\n\n## 目标\n\n## 输入\n\n## 输出\n", enabled: true, source: "uploaded", updatedAt: new Date().toISOString() });
+  }
+
+  function saveSkill(skill: SkillDocument) {
+    const next = { ...skill, name: skill.name.trim() || "未命名 Skill", description: skill.description.trim(), content: skill.content.trim(), updatedAt: new Date().toISOString() };
+    setSkills((items) => items.some((item) => item.id === next.id) ? items.map((item) => item.id === next.id ? next : item) : [next, ...items]);
+    setSkillEditor(null);
+    notify(`Skill「${next.name}」已保存，可被 Agent 调用`);
+  }
+
+  async function importSkillFile(file?: File) {
+    if (!file) return;
+    const content = await file.text();
+    const heading = content.match(/^#\s+(.+)$/m)?.[1]?.trim() || file.name.replace(/\.(md|markdown|txt)$/i, "");
+    openSkillEditor({ id: `uploaded-${Date.now()}`, name: heading, description: "从 Markdown 文件导入", content, enabled: true, source: "uploaded", updatedAt: new Date().toISOString() });
+  }
+
+  function openPlanEditor() {
+    if (!workflowPlan) return notify("当前还没有可编辑的执行计划");
+    setPlanDraft(JSON.parse(JSON.stringify(workflowPlan)) as WorkflowPlan);
+  }
+
+  function savePlanEditor() {
+    if (!planDraft) return;
+    const cleaned = { ...planDraft, summary: planDraft.summary.trim(), searchQueries: planDraft.searchQueries.map((item) => item.trim()).filter(Boolean), screeningCriteria: planDraft.screeningCriteria.map((item) => item.trim()).filter(Boolean), analysisSummary: planDraft.analysisSummary.map((item) => item.trim()).filter(Boolean), steps: planDraft.steps.map((item) => item.trim()).filter(Boolean), evidenceMap: planDraft.evidenceMap.filter((item) => item.evidence.trim() || item.researchDirection.trim() || item.ipValue.trim()) };
+    if (!cleaned.summary || !cleaned.searchQueries.length || !cleaned.steps.length) return notify("计划至少需要目标、一个检索主题和一个执行步骤");
+    setWorkflowPlan(cleaned);
+    setPlanDraft(null);
+    saveResumeTask(workflowFile?.name || "研发文件", "等待执行已编辑 Workflow Plan");
+    notify("Workflow Plan 已保存，下一步可确认执行");
+  }
+
   function saveAISettings() {
     const next = { ...aiConfig, endpoint: aiConfig.endpoint.trim().replace(/\/$/, ""), model: aiConfig.model.trim() || "glm-5.3" };
     setAIConfig(next);
@@ -266,8 +334,6 @@ export default function App() {
 
   function choosePreset(preset: UIPreset) {
     setUiPreset(preset);
-    if (preset === "gpt") setLayoutMode("agent");
-    if (preset === "cloudflare") setLayoutMode("dashboard");
     setChatOpen(false);
     setChatMinimized(false);
   }
@@ -328,13 +394,16 @@ export default function App() {
   async function searchPapers() {
     if (!query.trim()) return;
     setLoading(true);
+    const skillRunId = startSkillRun("论文检索 Skill", query);
     try {
       const data = await api<{ papers: Paper[]; warnings?: string[] }>(`/api/papers/search?q=${encodeURIComponent(query)}&source=all&limit=8`);
       setSearchResults(data.papers);
       setSearchWarnings(data.warnings || []);
       setConnected(true);
+      finishSkillRun(skillRunId, `已从论文源返回 ${data.papers.length} 篇结果`);
       notify(data.warnings?.length ? `已发现 ${data.papers.length} 篇，部分来源已降级` : `已从双源发现 ${data.papers.length} 篇论文`);
     } catch (error) {
+      finishSkillRun(skillRunId, error instanceof Error ? error.message : "论文检索 Skill 失败", true);
       notify(error instanceof Error ? error.message : "检索失败");
     } finally {
       setLoading(false);
@@ -352,11 +421,14 @@ export default function App() {
   }
 
   async function reviewPaper(id: number, status: "approved" | "rejected") {
+    const skillRunId = startSkillRun("论文相关性审核 Skill", `${status === "approved" ? "通过" : "驳回"} 论文 #${id}`);
     try {
       await api(`/api/papers/${id}/review`, { method: "POST", body: JSON.stringify({ status, note: status === "approved" ? "证据完整，符合研发知识入库要求" : "与当前研发方向相关性不足" }) });
+      finishSkillRun(skillRunId, status === "approved" ? "已审核通过并进入知识库" : "已标记为不纳入");
       notify(status === "approved" ? "审核通过，已进入研发知识库" : "已驳回");
       await refresh();
     } catch (error) {
+      finishSkillRun(skillRunId, error instanceof Error ? error.message : "论文审核 Skill 失败", true);
       notify(error instanceof Error ? error.message : "审核失败");
     }
   }
@@ -434,20 +506,23 @@ export default function App() {
     setChatMessages(nextMessages);
     setChatInput("");
     setChatBusy(true);
+    const skillRunId = startSkillRun("研发任务对话 Skill", content);
     startTrace([["识别任务", `识别为对话请求：${content.slice(0, 46)}`], ["读取上下文", "读取当前项目、页面和已有任务状态"], ["组织回答", "调用已启用模型生成可执行建议"], ["边界检查", "检查是否包含无依据结论或需要人工确认的动作"]]);
     try {
       advanceTrace(1);
-      const data = await api<{ reply: string; model: string }>("/api/assistant-chat", { method: "POST", body: JSON.stringify({ messages: nextMessages, context: chatContext() }) });
+      const data = await api<{ reply: string; model: string }>("/api/assistant-chat", { method: "POST", body: JSON.stringify({ messages: nextMessages, context: chatContext(), skillContext: enabledSkillContext() }) });
       advanceTrace(2, `已使用 ${data.model} 返回结果`);
       setChatMessages((messages) => [...messages, { role: "assistant", content: data.reply, model: data.model }]);
+      finishSkillRun(skillRunId, `已生成对话建议，模型：${data.model}`);
       finishTrace("回答已生成，可继续追问或确认下一步");
-    } catch (error) { finishTrace(error instanceof Error ? error.message : "Agent 对话失败", true); notify(error instanceof Error ? error.message : "Agent 对话失败"); }
+    } catch (error) { finishSkillRun(skillRunId, error instanceof Error ? error.message : "Skill 调用失败", true); finishTrace(error instanceof Error ? error.message : "Agent 对话失败", true); notify(error instanceof Error ? error.message : "Agent 对话失败"); }
     finally { setChatBusy(false); }
   }
 
   async function runFileWorkflow(file?: File) {
     if (!file || chatBusy) return;
     setChatBusy(true);
+    const skillRunId = startSkillRun("研发文件解析 Skill", file.name);
     saveResumeTask(file.name, "正在生成 Workflow Plan");
     setChatMessages((messages) => [...messages, { role: "user", content: `请先为研发文件制定 Workflow Plan：${file.name}` }]);
     startTrace([["识别输入", `收到研发文件：${file.name}`], ["提取文本", "在浏览器本地读取 PDF / DOCX 文本"], ["提炼技术事实", "提取对象、方法、工程约束和评价指标"], ["制定检索 Plan", "生成互补检索主题、筛选标准和证据映射"], ["等待确认", "计划生成后由用户确认再执行"]]);
@@ -457,15 +532,17 @@ export default function App() {
       advanceTrace(1);
       const text = await extractFile(file);
       advanceTrace(2, `已提取 ${text.length.toLocaleString()} 个字符`);
-      const data = await api<{ plan: WorkflowPlan; model: string }>("/api/assistant-plan", { method: "POST", body: JSON.stringify({ sourceText: text, fileName: file.name, projectDescription: activeProject?.description || "" }) });
+      const data = await api<{ plan: WorkflowPlan; model: string }>("/api/assistant-plan", { method: "POST", body: JSON.stringify({ sourceText: text, fileName: file.name, projectDescription: activeProject?.description || "", skillContext: enabledSkillContext() }) });
       advanceTrace(3, `已生成 ${data.plan.searchQueries.length} 组检索主题`);
       setWorkflowPlan({ ...data.plan, model: data.model });
       setWorkflowFile(file);
       setWorkflowText(text);
       setWorkflowStage("");
+      finishSkillRun(skillRunId, `已提取文件并完成计划输入：${text.length.toLocaleString()} 字符`);
       finishTrace("Plan 已生成，等待用户确认");
       setChatMessages((messages) => [...messages, { role: "assistant", content: "我已经根据文件内容拟好执行计划，请确认后再开始搜索、初审和转化。" }]);
     } catch (error) {
+      finishSkillRun(skillRunId, error instanceof Error ? error.message : "文件解析 Skill 失败", true);
       setWorkflowStage("");
       finishTrace(error instanceof Error ? error.message : "Workflow Plan 生成失败", true);
       setChatMessages((messages) => [...messages, { role: "assistant", content: error instanceof Error ? error.message : "Workflow Plan 生成失败" }]);
@@ -478,6 +555,7 @@ export default function App() {
   async function confirmFileWorkflow() {
     if (!workflowPlan || !workflowFile || chatBusy) return;
     setChatBusy(true);
+    const searchSkillRunId = startSkillRun("论文检索 Skill", workflowPlan.searchQueries.join("；"));
     startTrace([["确认 Plan", "用户已确认执行检索计划"], ["导入研发文件", "保存文件文本并绑定当前项目"], ["拆分检索主题", `${workflowPlan.searchQueries.length} 组互补主题并行检索`], ["合并去重", "按标题归一化并去除重复论文"], ["初筛候选", "保留高相关度论文，等待用户确认入库"]]);
     try {
       setWorkflowStage("正在导入研发文件…");
@@ -496,10 +574,14 @@ export default function App() {
       const candidates = papers.slice(0, 12);
       setWorkflowCandidates(candidates);
       setSearchResults(papers);
+      finishSkillRun(searchSkillRunId, `已调用 ${workflowPlan.searchQueries.length} 组主题，得到 ${papers.length} 篇去重结果`);
+      const reviewSkillRunId = startSkillRun("论文相关性审核 Skill", `${candidates.length} 篇候选论文`);
+      finishSkillRun(reviewSkillRunId, `已完成初筛，保留 ${candidates.length} 篇待人工确认候选`);
       setWorkflowStage("");
       finishTrace(`初筛完成：${papers.length} 篇去重结果，${candidates.length} 篇候选待确认`);
       setChatMessages((messages) => [...messages, { role: "assistant", content: `计划已执行到 Agent 初筛：通过 ${workflowPlan.searchQueries.length} 组主题发现 ${papers.length} 篇去重论文，已保留 ${candidates.length} 篇候选。请确认后，我会审核入库并生成知识产权材料。` }]);
     } catch (error) {
+      finishSkillRun(searchSkillRunId, error instanceof Error ? error.message : "论文检索 Skill 失败", true);
       setWorkflowStage("");
       finishTrace(error instanceof Error ? error.message : "Workflow 执行失败", true);
       setChatMessages((messages) => [...messages, { role: "assistant", content: error instanceof Error ? error.message : "Workflow 执行失败" }]);
@@ -593,6 +675,7 @@ export default function App() {
     if (!sourceRefs.length) return notify("请先选择至少一份论文或研发文件");
     if (IS_LOCAL_DEMO && modelChoice !== "k3") return notify("本地页面目前只支持 K3；公网 Demo 可选择 GLM-5.3 或 Workers AI");
     setLoading(true);
+    const skillRunId = startSkillRun("知识产权生成 Skill", `${sourceRefs.length} 份来源资料 · ${materialTitle}`);
     setActiveDraft(null);
     if (!reasoningTrace.some((step) => step.status === "active")) startTrace([["读取资料", `读取 ${sourceRefs.length} 份已入库资料`], ["提炼创新点", "识别技术问题、技术方案和可保护特征"], ["组织材料", "按技术交底书结构组织章节和权利要求建议"], ["质量校验", "标记待补充信息，检查证据与结论边界"]]);
     setGenerationStep("正在读取已入库资料…");
@@ -614,17 +697,20 @@ export default function App() {
         setActiveDraft(localDraft);
         setDrafts((current) => [localDraft, ...current]);
         finishTrace("材料初稿已生成，可进入人工复核");
+        finishSkillRun(skillRunId, "已生成技术交底书结构、摘要和权利要求建议");
         notify("K3 已生成知识产权材料初稿");
         return;
       }
       advanceTrace(1);
-      const data = await api<{ draft: Draft }>("/api/ip-drafts", { method: "POST", body: JSON.stringify({ title: materialTitle, sources: sourceRefs, groupName: draftGroup, model: modelChoice, speed: speedChoice }) });
+      const data = await api<{ draft: Draft }>("/api/ip-drafts", { method: "POST", body: JSON.stringify({ title: materialTitle, sources: sourceRefs, groupName: draftGroup, model: modelChoice, speed: speedChoice, skillContext: enabledSkillContext() }) });
       advanceTrace(2, `已生成 ${data.draft.title}`);
       setActiveDraft(data.draft);
       finishTrace("材料初稿已生成，可进入人工复核");
+      finishSkillRun(skillRunId, `已生成材料：${data.draft.title}`);
       notify("知识产权材料初稿已生成");
       await refresh();
     } catch (error) {
+      finishSkillRun(skillRunId, error instanceof Error ? error.message : "知识产权生成 Skill 失败", true);
       finishTrace(error instanceof Error ? error.message : "生成失败", true);
       notify(error instanceof Error ? error.message : "生成失败");
     } finally {
@@ -696,13 +782,10 @@ export default function App() {
       : view === "ip"
         ? ["检查当前材料是否完整", "补充权利要求书建议", "优化技术方案和有益效果"]
         : ["如何开始研发知识闭环？", "上传研发文件并制定 Plan", "搜索工业视觉相关论文"];
-  const agentSkills = [
-    ["研发文件解析 Skill", workflowText ? "已完成" : "待调用", workflowText ? "done" : "idle"],
-    ["技术主题规划 Skill", workflowPlan ? "已完成" : "待调用", workflowPlan ? "done" : "idle"],
-    ["论文检索 Skill", searchResults.length ? `${searchResults.length} 篇` : "待调用", searchResults.length ? "done" : "idle"],
-    ["论文相关性审核 Skill", workflowCandidates.length ? `${workflowCandidates.length} 篇候选` : "等待确认", workflowCandidates.length ? "current" : "idle"],
-    ["知识产权生成 Skill", activeDraft ? "已生成" : "等待输入", activeDraft ? "done" : "idle"],
-  ];
+  const agentSkills = skills.map((skill) => {
+    const latestRun = skillRuns.find((run) => run.name === skill.name);
+    return [skill.name, latestRun ? `${latestRun.status === "running" ? "执行中" : latestRun.status === "error" ? "失败" : "已完成"} · ${latestRun.output}` : skill.enabled ? "已启用 · 待调用" : "已停用", latestRun?.status === "running" ? "current" : latestRun?.status === "done" ? "done" : latestRun?.status === "error" ? "error" : "idle"] as [string, string, string];
+  });
   const agentContextTitle = view === "discover" ? "论文检索任务" : view === "library" ? "研发知识库" : view === "ip" ? "知识产权材料" : "研发知识闭环";
 
   return (
@@ -710,13 +793,13 @@ export default function App() {
       <aside className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`}>
         <div className="brand"><span>研</span><div><strong>研知 Agent</strong><small>R&D Intelligence</small></div><button className="sidebar-collapse" onClick={() => setSidebarCollapsed((value) => !value)} title={sidebarCollapsed ? "展开导航" : "折叠导航"}>{sidebarCollapsed ? "›" : "‹"}</button></div>
         <nav>
-          {[
+          {[ 
             ["dashboard", "✦", "AI 工作台"],
             ["discover", "⌕", "论文雷达"],
             ["library", "▤", "资源库"],
             ["ip", "◇", "成果材料"],
           ].map(([key, icon, label]) => (
-            <button className={view === key ? "active" : ""} key={key} onClick={() => setView(key as View)}>
+            <button className={view === key && (key !== "dashboard" || aiFocus) ? "active" : ""} key={key} onClick={() => { const nextView = key as View; setView(nextView); setAIFocus(nextView === "dashboard"); setChatOpen(false); setChatMinimized(false); }}>
               <b>{icon}</b><span>{label}</span>{key === "library" && pendingPapers.length > 0 ? <em>{pendingPapers.length}</em> : null}
             </button>
           ))}
@@ -726,28 +809,28 @@ export default function App() {
       <main>
         <header>
           <div className="header-title"><p className="eyebrow">研发知识与成果转化中心</p><h1>{pageTitle}</h1></div>
-          <div className="global-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { setView("discover"); void searchPapers(); } }} placeholder="搜索论文、研发文件或知识产权材料" /><kbd>Ctrl K</kbd></div>
-          <div className="top-actions"><div className="project-switcher"><select value={activeProjectId} onChange={(event) => switchProject(Number(event.target.value))}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><button onClick={renameProject} title="编辑当前项目">编辑</button></div><button className="layout-switch" onClick={() => { setLayoutMode((mode) => mode === "dashboard" ? "agent" : "dashboard"); setChatOpen(false); setChatMinimized(false); }}>{layoutMode === "dashboard" ? "Agent 工作台" : "Dashboard 视图"}</button>{layoutMode === "dashboard" ? <button className={`ai-trigger${chatOpen ? " active" : ""}`} onClick={() => { setChatOpen((value) => !value); setChatMinimized(false); }}><span>✦</span> AI 助手</button> : null}<span className={connected ? "live-dot" : "live-dot offline"}>{connected ? "在线" : "离线"}</span><button className="avatar" onClick={() => setCodeInput(accessCode)}>FC</button></div>
+          <div className="global-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { setAIFocus(false); setView("discover"); void searchPapers(); } }} placeholder="搜索论文、研发文件或知识产权材料" /><kbd>Ctrl K</kbd></div>
+          <div className="top-actions"><div className="project-switcher"><select value={activeProjectId} onChange={(event) => switchProject(Number(event.target.value))}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><button onClick={renameProject} title="编辑当前项目">编辑</button></div>{aiFocus ? <button className="focus-back" onClick={() => { setAIFocus(false); setView("dashboard"); }}>← 返回任务中心</button> : null}{!aiFocus ? <button className={`ai-trigger${chatOpen ? " active" : ""}`} onClick={() => { setChatOpen((value) => !value); setChatMinimized(false); }}><span>✦</span> AI 助手</button> : null}<span className={connected ? "live-dot" : "live-dot offline"}>{connected ? "在线" : "离线"}</span><button className="avatar" onClick={() => setCodeInput(accessCode)}>FC</button></div>
         </header>
 
-        {layoutMode === "dashboard" && view === "dashboard" && (
+        {!aiFocus && view === "dashboard" && (
           <>
             <section className="task-center-hero">
-              <div><span className="hero-label">当前项目 · {activeProject?.name || "默认研发项目"} <button className="project-inline-add" onClick={() => setProjectModalOpen(true)}>＋新增项目</button></span><h2>今天要推进哪项研发任务？</h2><p>{activeProject?.description || "把论文、研发文件和成果材料集中到一个项目里，Agent 会帮你持续推进。"}</p><div className="hero-actions"><button className="primary" onClick={() => setView("discover")}>搜索论文 <span>→</span></button><button className="chat-launch" onClick={() => { setLayoutMode("agent"); setChatOpen(false); setChatMinimized(false); }}>与 Agent 对话 <span>✦</span></button><button className="secondary" onClick={() => { setView("library"); setTimeout(() => fileRef.current?.click(), 0); }}>导入研发文件</button></div></div>
+              <div><span className="hero-label">当前项目 · {activeProject?.name || "默认研发项目"} <button className="project-inline-add" onClick={() => setProjectModalOpen(true)}>＋新增项目</button></span><h2>今天要推进哪项研发任务？</h2><p>{activeProject?.description || "把论文、研发文件和成果材料集中到一个项目里，Agent 会帮你持续推进。"}</p><div className="hero-actions"><button className="primary" onClick={() => setView("discover")}>搜索论文 <span>→</span></button><button className="chat-launch" onClick={() => { setAIFocus(true); setChatOpen(false); setChatMinimized(false); }}>与 Agent 对话 <span>✦</span></button><button className="secondary" onClick={() => { setView("library"); setTimeout(() => fileRef.current?.click(), 0); }}>导入研发文件</button></div></div>
               <div className="task-center-summary"><div><span>当前闭环</span><strong>{flowSteps.filter(([, , , status]) => status === "done").length}/4</strong><small>个阶段已完成</small></div><div><span>待我处理</span><strong>{todoItems.length}</strong><small>项待办任务</small></div></div>
             </section>
             <section className="task-center-grid">
-              <div className="panel task-panel"><div className="panel-head"><div><p className="eyebrow">MY TASKS</p><h3>待我处理</h3></div><span className="count-badge">{todoItems.length}</span></div>{todoItems.length ? <div className="todo-list">{todoItems.map((item) => <button className="todo-item" key={item.key} onClick={() => { if (item.key === "review") setView("review"); else if (item.key === "draft") setView("ip"); else if (item.key === "resume") setLayoutMode("agent"); else setLayoutMode("agent"); }}><i>{item.key === "review" ? "⌕" : item.key === "draft" ? "◇" : "✦"}</i><span><strong>{item.label}</strong><small>{item.detail}</small></span><b>{item.action} →</b></button>)}</div> : <EmptyState title="暂时没有待处理任务" detail="你可以从搜索论文或导入研发文件开始。" />}</div>
+              <div className="panel task-panel"><div className="panel-head"><div><p className="eyebrow">MY TASKS</p><h3>待我处理</h3></div><span className="count-badge">{todoItems.length}</span></div>{todoItems.length ? <div className="todo-list">{todoItems.map((item) => <button className="todo-item" key={item.key} onClick={() => { if (item.key === "review") { setView("review"); setAIFocus(false); } else if (item.key === "draft") { setView("ip"); setAIFocus(false); } else { setAIFocus(true); } }}><i>{item.key === "review" ? "⌕" : item.key === "draft" ? "◇" : "✦"}</i><span><strong>{item.label}</strong><small>{item.detail}</small></span><b>{item.action} →</b></button>)}</div> : <EmptyState title="暂时没有待处理任务" detail="你可以从搜索论文或导入研发文件开始。" />}</div>
               <div className="panel task-panel"><div className="panel-head"><div><p className="eyebrow">QUICK START</p><h3>快速开始</h3></div></div><div className="quick-start-list"><button onClick={() => setView("discover")}><i>01</i><span><strong>搜索论文</strong><small>从技术主题发现外部研究证据</small></span><b>→</b></button><button onClick={() => { setView("library"); setTimeout(() => fileRef.current?.click(), 0); }}><i>02</i><span><strong>导入研发文件</strong><small>让 Agent 先读懂方案再制定 Plan</small></span><b>→</b></button><button onClick={() => setView("ip")}><i>03</i><span><strong>生成成果材料</strong><small>把已有资料转成可审核的申报初稿</small></span><b>→</b></button></div></div>
             </section>
             <section className="task-center-lower">
               <div className="panel"><div className="panel-head"><div><p className="eyebrow">RECENT ASSETS</p><h3>最近打开</h3></div><button onClick={() => setView("library")}>查看资源库</button></div>{papers.slice(0, 3).map((paper) => <PaperRow paper={paper} key={paper.externalId} />)}{!papers.length && !documents.length ? <EmptyState title="还没有研发资产" detail="搜索论文或导入研发文件后，这里会自动显示。" /> : null}</div>
-              <div className="panel flow-panel"><div className="panel-head"><div><p className="eyebrow">WORKFLOW STATUS</p><h3>研发知识闭环</h3></div><button onClick={() => setLayoutMode("agent")}>打开 Agent</button></div><div className="compact-flow">{flowSteps.map(([n, t, d, s]) => <div className={`compact-flow-row ${s}`} key={n}><i>{s === "done" ? "✓" : n}</i><span><strong>{t}</strong><small>{d}</small></span><b>{s === "current" ? "进行中" : s === "done" ? "已完成" : "待开始"}</b></div>)}</div></div>
+              <div className="panel flow-panel"><div className="panel-head"><div><p className="eyebrow">WORKFLOW STATUS</p><h3>研发知识闭环</h3></div><button onClick={() => setAIFocus(true)}>打开 AI 专注模式</button></div><div className="compact-flow">{flowSteps.map(([n, t, d, s]) => <div className={`compact-flow-row ${s}`} key={n}><i>{s === "done" ? "✓" : n}</i><span><strong>{t}</strong><small>{d}</small></span><b>{s === "current" ? "进行中" : s === "done" ? "已完成" : "待开始"}</b></div>)}</div></div>
             </section>
           </>
         )}
 
-        {layoutMode === "dashboard" && view === "discover" && (
+        {!aiFocus && view === "discover" && (
           <section className="workspace">
             <div className="workspace-head"><div><p className="eyebrow">DUAL-SOURCE DISCOVERY</p><h2>自动搜集论文</h2><p>同时检索 arXiv 与 Semantic Scholar；限流时自动切换 Crossref，并合并重复结果。</p></div><span className="source-pill">双源实时检索</span></div>
             <div className="search-box"><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void searchPapers()} placeholder="输入技术主题，例如：工业视觉缺陷检测 Agent" /><button className="primary" disabled={loading} onClick={() => void searchPapers()}>{loading ? "正在检索…" : "开始检索"}</button></div>
@@ -756,7 +839,7 @@ export default function App() {
           </section>
         )}
 
-        {layoutMode === "dashboard" && view === "review" && (
+        {!aiFocus && view === "review" && (
           <section className="workspace">
             <div className="workspace-head"><div><p className="eyebrow">HUMAN IN THE LOOP</p><h2>审核后入库</h2><p>保留人工判断，确保知识来源可靠、方向相关、证据可追溯。</p></div><div className="review-summary"><span>{pendingPapers.length} 项待处理</span><label><input type="checkbox" checked={pendingPapers.length > 0 && selectedReviewIds.length === pendingPapers.length} onChange={(event) => setSelectedReviewIds(event.target.checked ? pendingPapers.map((paper) => paper.id!).filter(Boolean) : [])} />全选</label></div></div>
             {selectedReviewIds.length ? <div className="batch-toolbar"><strong>已选择 {selectedReviewIds.length} 篇</strong><button className="primary" disabled={loading} onClick={() => void batchReview("approved")}>批量通过并入库</button><button className="ghost danger" disabled={loading} onClick={() => void batchReview("rejected")}>批量驳回</button><button className="ghost" onClick={() => setSelectedReviewIds([])}>取消选择</button></div> : null}
@@ -764,7 +847,7 @@ export default function App() {
           </section>
         )}
 
-        {layoutMode === "dashboard" && view === "library" && (
+        {!aiFocus && view === "library" && (
           <section className="workspace">
             <div className="workspace-head"><div><p className="eyebrow">R&D KNOWLEDGE BASE</p><h2>研发知识库</h2><p>论文与研发文档统一沉淀，为成果转化提供可信上下文。</p></div><><input ref={fileRef} hidden type="file" accept=".pdf,.docx" onChange={(event) => void uploadDocument(event.target.files?.[0])} /><button className="primary" disabled={loading} onClick={() => fileRef.current?.click()}>导入 PDF / DOCX</button></></div>
             <div className="library-toolbar"><label>当前分组<select value={libraryGroup} onChange={(event) => setLibraryGroup(event.target.value)}><option>全部分组</option>{allGroups.map((group) => <option key={group}>{group}</option>)}</select></label><button className="ghost" onClick={createCustomGroup}>+ 新建分组</button><button className="ghost" onClick={() => setView("review")}>待审核 {pendingPapers.length}</button><span>已入库论文 {approvedPapers.length} 篇</span></div>
@@ -772,7 +855,7 @@ export default function App() {
           </section>
         )}
 
-        {layoutMode === "dashboard" && view === "ip" && (
+        {!aiFocus && view === "ip" && (
           <section className="workspace">
             <div className="workspace-head"><div><p className="eyebrow">IP DRAFTING AGENT</p><h2>知识产权材料生成</h2><p>基于选定研发资料，生成技术交底书、摘要和权利要求初稿。</p></div><span className="source-pill">{IS_LOCAL_DEMO ? (k3Ready ? "本地 K3 · 已连接" : "本地 K3 · 未连接") : "GLM-5.3 · 自动容错"}</span></div>
             <div className="ip-layout">
@@ -787,26 +870,26 @@ export default function App() {
           </section>
         )}
 
-        {layoutMode === "agent" && (
+        {aiFocus && (
           <section className="agent-workspace">
             <div className="agent-chat-column">
               <div className="agent-welcome"><p className="eyebrow">RESEARCH OPERATING SYSTEM</p><h2>你好，我是研知 Agent</h2><p>从一份研发文件、一组论文或一个问题开始，我会帮你规划任务、调用技能并沉淀成果。</p>{resumeTask ? <div className="resume-banner"><span>↻</span><div><strong>发现上次未完成任务</strong><small>{resumeTask.fileName} · {resumeTask.stage}</small></div><button onClick={() => chatFileRef.current?.click()}>重新导入继续</button></div> : null}<div className="agent-quick-grid">{["上传研发文件并制定 Plan", "搜索当前技术方向论文", "分析研发文件中的创新点", "生成发明专利技术交底书"].map((prompt) => <button key={prompt} onClick={() => prompt.startsWith("上传") ? chatFileRef.current?.click() : void sendChat(prompt)}><span>✦</span>{prompt}<b>→</b></button>)}</div></div>
-              <div className="agent-message-list">{chatMessages.length ? chatMessages.map((item, index) => <div className={`chat-bubble ${item.role}`} key={`${item.role}-${index}`}><p>{item.content}</p>{item.model ? <small>{item.model}</small> : null}</div>) : <div className="agent-empty-hint"><span>⌁</span><strong>从对话开始你的研发任务</strong><p>你可以直接上传 PDF / DOCX，或告诉我你想查找的技术方向。</p></div>}{workflowStage ? <div className="workflow-status">{workflowStage}</div> : null}{workflowPlan ? <div className="workflow-card agent-plan-card"><div className="agent-card-title"><strong>Agent 执行计划</strong><span>{workflowPlan.model || "自动模型"}</span></div><p>{workflowPlan.summary}</p><small>检索主题：{workflowPlan.searchQueries.join("；")}</small><ul>{workflowPlan.steps.map((step) => <li key={step}>{step}</li>)}</ul>{workflowPlan.evidenceMap.slice(0, 2).map((item) => <div className="evidence-map" key={item.evidence}><b>研发证据：</b>{item.evidence}<br/><b>论文方向：</b>{item.researchDirection}<br/><b>转化价值：</b>{item.ipValue}</div>)}{!workflowCandidates.length ? <div className="workflow-actions"><button className="primary" disabled={chatBusy} onClick={() => void confirmFileWorkflow()}>确认 Plan，开始执行</button><button className="ghost" onClick={() => { setWorkflowPlan(null); setWorkflowFile(null); setWorkflowText(""); }}>取消</button></div> : <div className="workflow-result">已发现 {workflowCandidates.length} 篇候选论文，等待确认入库。</div>}</div> : null}{chatBusy ? <div className="chat-bubble assistant typing">Agent 正在调用 Skill 并整理结果…</div> : null}</div>
+              <div className="agent-message-list">{chatMessages.length ? chatMessages.map((item, index) => <div className={`chat-bubble ${item.role}`} key={`${item.role}-${index}`}><p>{item.content}</p>{item.model ? <small>{item.model}</small> : null}</div>) : <div className="agent-empty-hint"><span>⌁</span><strong>从对话开始你的研发任务</strong><p>你可以直接上传 PDF / DOCX，或告诉我你想查找的技术方向。</p></div>}{workflowStage ? <div className="workflow-status">{workflowStage}</div> : null}{workflowPlan ? <div className="workflow-card agent-plan-card"><div className="agent-card-title"><strong>Agent 执行计划</strong><span>{workflowPlan.model || "自动模型"}</span><button className="ghost" onClick={openPlanEditor}>编辑 Plan</button></div><p>{workflowPlan.summary}</p><div className="plan-preview-grid"><small><b>检索主题</b>{workflowPlan.searchQueries.join("；")}</small><small><b>筛选标准</b>{workflowPlan.screeningCriteria.join("；")}</small><small><b>分析依据</b>{workflowPlan.analysisSummary.join("；")}</small><small><b>执行步骤</b>{workflowPlan.steps.join(" → ")}</small></div>{workflowPlan.evidenceMap.slice(0, 3).map((item) => <div className="evidence-map" key={item.evidence}><b>研发证据：</b>{item.evidence}<br/><b>论文方向：</b>{item.researchDirection}<br/><b>转化价值：</b>{item.ipValue}</div>)}{!workflowCandidates.length ? <div className="workflow-actions"><button className="primary" disabled={chatBusy} onClick={() => void confirmFileWorkflow()}>确认 Plan，开始执行</button><button className="ghost" onClick={() => { setWorkflowPlan(null); setWorkflowFile(null); setWorkflowText(""); }}>取消</button></div> : <div className="workflow-result">已发现 {workflowCandidates.length} 篇候选论文，等待确认入库。</div>}</div> : null}{chatBusy ? <div className="chat-bubble assistant typing">Agent 正在调用 Skill 并整理结果…</div> : null}</div>
               <div className="agent-composer"><div className="composer-tools"><input ref={chatFileRef} hidden type="file" accept=".pdf,.docx" onChange={(event) => void runFileWorkflow(event.target.files?.[0])} /><button className="chat-upload" disabled={chatBusy} onClick={() => chatFileRef.current?.click()}>＋ 文件</button><select value={modelChoice} onChange={(event) => setModelChoice(event.target.value as ModelChoice)}><option value="auto">自动模型</option><option value="glm-5.3">GLM-5.3</option><option value="qwen3">Qwen3</option>{IS_LOCAL_DEMO ? <option value="k3">K3</option> : null}</select><select value={speedChoice} onChange={(event) => setSpeedChoice(event.target.value as SpeedChoice)}><option value="fast">快速</option><option value="balanced">均衡</option><option value="deep">深度</option></select></div><div className="composer-input"><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder="描述你的研发任务，或询问当前项目…" rows={3} /><button className="primary" disabled={chatBusy || !chatInput.trim()} onClick={() => void sendChat()}>发送 ↑</button></div><small>Agent 会在执行关键动作前征求确认，重要结果均可追溯。</small></div>
             </div>
             <aside className="agent-context-column">
               <div className="context-section"><div className="context-title"><span>当前项目</span><button onClick={renameProject}>编辑</button></div><strong>{activeProject?.name || "默认研发项目"}</strong><p>{activeProject?.description || "尚未填写项目说明"}</p></div>
-              <div className="context-section"><div className="context-title"><span>执行计划</span><b>{workflowStage || (workflowPlan ? "待确认" : "等待输入")}</b></div><div className="mini-timeline"><div className="mini-step active"><i>1</i><span>理解任务</span></div><div className={`mini-step ${workflowPlan ? "active" : ""}`}><i>2</i><span>制定 Plan</span></div><div className={`mini-step ${searchResults.length ? "active" : ""}`}><i>3</i><span>检索与审核</span></div><div className={`mini-step ${activeDraft ? "active" : ""}`}><i>4</i><span>沉淀成果</span></div></div></div>
-              <div className="context-section"><div className="context-title"><span>Skill 调用</span><button onClick={() => notify("可点击任一 Skill 查看输入、输出和重跑入口")}>说明</button></div><div className="skill-list">{agentSkills.map(([name, status, state]) => <div className="skill-item" key={name}><button className="skill-row" onClick={() => setSkillDetail(skillDetail === name ? null : name)}><i className={state}>{state === "done" ? "✓" : state === "current" ? "·" : "○"}</i><span>{name}</span><small>{status}</small><b>{skillDetail === name ? "⌃" : "⌄"}</b></button>{skillDetail === name ? <div className="skill-detail"><p><strong>输入：</strong>{name.includes("论文") ? "当前项目主题、研发文件摘要、检索结果" : "当前项目上下文与上一步 Skill 输出"}</p><p><strong>输出：</strong>{name.includes("生成") ? "技术交底书、摘要、权利要求建议" : name.includes("检索") ? "论文候选、来源和相关性依据" : "结构化技术事实与可追溯证据"}</p><div><small>状态：{status} · 模型：{aiConfig.enabled ? aiConfig.model : "平台默认"}</small><button className="ghost" onClick={() => void sendChat(`重新执行${name}，并说明本次输入和筛选依据`)}>重新执行</button></div></div> : null}</div>)}</div></div>
+              <div className="context-section"><div className="context-title"><span>执行计划</span><div className="context-title-actions"><b>{workflowStage || (workflowPlan ? "待确认" : "等待输入")}</b>{workflowPlan ? <button onClick={openPlanEditor}>编辑</button> : null}</div></div><div className="mini-timeline"><div className="mini-step active"><i>1</i><span>理解任务</span></div><div className={`mini-step ${workflowPlan ? "active" : ""}`}><i>2</i><span>制定 Plan</span></div><div className={`mini-step ${searchResults.length ? "active" : ""}`}><i>3</i><span>检索与审核</span></div><div className={`mini-step ${activeDraft ? "active" : ""}`}><i>4</i><span>沉淀成果</span></div></div>{workflowPlan ? <div className="plan-context-details"><strong>{workflowPlan.summary}</strong><small>检索主题：{workflowPlan.searchQueries.join("；")}</small><small>筛选标准：{workflowPlan.screeningCriteria.join("；")}</small><small>分析依据：{workflowPlan.analysisSummary.join("；")}</small><small>执行步骤：{workflowPlan.steps.join(" → ")}</small><small>证据映射：{workflowPlan.evidenceMap.length} 条</small></div> : <p className="context-empty">上传研发文件后，Agent 会在这里生成可编辑的完整计划。</p>}</div>
+              <div className="context-section"><div className="context-title"><span>Skill 调用</span><button onClick={() => setSkillLibraryOpen(true)}>管理文档</button></div><div className="skill-list">{agentSkills.map(([name, status, state]) => { const skill = skills.find((item) => item.name === name); const latestRun = skillRuns.find((run) => run.name === name); return <div className="skill-item" key={name}><button className="skill-row" onClick={() => setSkillDetail(skillDetail === name ? null : name)}><i className={state}>{state === "done" ? "✓" : state === "error" ? "!" : state === "current" ? "·" : "○"}</i><span><strong>{name}</strong><small>{status}</small></span><b>{skillDetail === name ? "⌃" : "⌄"}</b></button>{skillDetail === name ? <div className="skill-detail"><p><strong>文档：</strong>{skill?.source === "uploaded" ? "用户上传 Markdown" : "内置 Markdown"} · {skill?.enabled ? "已启用" : "已停用"}</p><p><strong>输入：</strong>{latestRun?.input || "等待实际任务输入"}</p><p><strong>输出：</strong>{latestRun?.output || skill?.description || "暂无调用记录"}</p><div><small>模型：{aiConfig.enabled ? aiConfig.model : "平台默认"}{latestRun?.duration ? ` · ${latestRun.duration}ms` : ""}</small><button className="ghost" onClick={() => void sendChat(`重新执行${name}，并严格按照该 Skill 的 Markdown 规则输出结果`)}>重新执行</button></div></div> : null}</div>; })}</div>{skillRuns.length ? <div className="skill-run-log"><strong>最近实际调用</strong>{skillRuns.slice(0, 3).map((run) => <small key={run.id}>● {run.name} · {run.status === "running" ? "执行中" : run.status === "done" ? "已完成" : "失败"} · {run.output}</small>)}</div> : <p className="context-empty">执行任务后，这里会显示实际调用的 Skill、输入、输出和耗时。</p>}</div>
               <div className="context-section reasoning-section"><div className="context-title"><span>AI 分析步骤</span><b>{reasoningTrace.some((step) => step.status === "active") ? "进行中" : "可追溯"}</b></div><ReasoningTrace steps={reasoningTrace} /></div>
               <div className="context-section"><div className="context-title"><span>证据链</span><b>{workflowPlan?.evidenceMap.length || 0} 条</b></div>{workflowPlan?.evidenceMap.length ? workflowPlan.evidenceMap.slice(0, 2).map((item) => <div className="context-evidence" key={item.evidence}><strong>{item.evidence}</strong><span>→ {item.researchDirection}</span></div>) : <p className="context-empty">上传研发文件或选中论文后，Agent 会在这里展示证据关联。</p>}</div>
-              <div className="context-section"><div className="context-title"><span>任务产物</span><button onClick={() => { setLayoutMode("dashboard"); setView("library"); }}>查看资源库</button></div><div className="artifact-list">{workflowFile ? <button onClick={() => notify(`当前文件：${workflowFile.name}`)}><i>PDF</i><span>{workflowFile.name}<small>研发文件</small></span></button> : null}{workflowCandidates.length ? <button onClick={() => { setLayoutMode("dashboard"); setView("discover"); }}><i>论文</i><span>{workflowCandidates.length} 篇候选论文<small>Agent 初筛结果</small></span></button> : null}{activeDraft ? <button onClick={() => { setLayoutMode("dashboard"); setView("ip"); }}><i>IP</i><span>{activeDraft.title}<small>知识产权材料</small></span></button> : null}{!workflowFile && !workflowCandidates.length && !activeDraft ? <p className="context-empty">完成任务后，文件、论文和材料会出现在这里。</p> : null}</div></div>
+              <div className="context-section"><div className="context-title"><span>任务产物</span><button onClick={() => { setAIFocus(false); setView("library"); }}>查看资源库</button></div><div className="artifact-list">{workflowFile ? <button onClick={() => notify(`当前文件：${workflowFile.name}`)}><i>PDF</i><span>{workflowFile.name}<small>研发文件</small></span></button> : null}{workflowCandidates.length ? <button onClick={() => { setAIFocus(false); setView("discover"); }}><i>论文</i><span>{workflowCandidates.length} 篇候选论文<small>Agent 初筛结果</small></span></button> : null}{activeDraft ? <button onClick={() => { setAIFocus(false); setView("ip"); }}><i>IP</i><span>{activeDraft.title}<small>知识产权材料</small></span></button> : null}{!workflowFile && !workflowCandidates.length && !activeDraft ? <p className="context-empty">完成任务后，文件、论文和材料会出现在这里。</p> : null}</div></div>
             </aside>
           </section>
         )}
       </main>
 
-      {layoutMode === "dashboard" && chatOpen ? <aside className={`assistant-panel${chatMinimized ? " minimized" : ""}`}>
+      {!aiFocus && chatOpen ? <aside className={`assistant-panel${chatMinimized ? " minimized" : ""}`}>
         <div className="assistant-panel-head"><div><p className="eyebrow">AI COPILOT</p><strong>研知 Agent</strong><small>当前页面：{pageTitle} · {activeProject?.name || "默认项目"}</small></div><div className="chat-window-actions"><button title={chatMinimized ? "展开 AI 面板" : "折叠 AI 面板"} onClick={toggleChatMinimized}>{chatMinimized ? "‹" : "›"}</button><button title="关闭 AI 面板" onClick={() => setChatOpen(false)}>×</button></div></div>
         {!chatMinimized ? <>
           <div className="assistant-context"><span>当前上下文</span><strong>{view === "discover" ? `论文检索结果 ${searchResults.length} 篇` : view === "library" ? `资源库 ${approvedPapers.length + documents.length} 项` : view === "ip" ? "成果材料工作区" : "研发知识工作台"}</strong><small>Agent 会根据当前页面和项目状态给出建议</small></div>
@@ -821,6 +904,9 @@ export default function App() {
       {!accessCode || codeInput ? <div className="modal-backdrop"><div className="access-modal"><span className="seal">研</span><p className="eyebrow">SECURE DEMO</p><h2>进入研知 Agent</h2><p>请输入演示访问码。它只保存在当前浏览器会话中，用于保护 AI 调用额度。</p><input autoFocus value={codeInput} onChange={(event) => { setCodeInput(event.target.value); setAuthError(""); }} onKeyDown={(event) => event.key === "Enter" && void unlock()} placeholder="演示访问码" type="password" />{authError ? <div className="form-error">{authError}</div> : null}<button className="primary" disabled={loading} onClick={() => void unlock()}>{loading ? "正在验证…" : "进入工作台"}</button>{accessCode ? <button className="text-button" onClick={() => setCodeInput("")}>取消</button> : null}</div></div> : null}
       {settingsOpen ? <button className="settings-feishu-tab" onClick={() => setFeishuDemoOpen(true)}>⚙ 集成中心 · 飞书</button> : null}
       {feishuDemoOpen ? <div className="modal-backdrop" onClick={() => setFeishuDemoOpen(false)}><section className="feishu-modal" onClick={(event) => event.stopPropagation()}><div className="settings-head"><div><p className="eyebrow">INTEGRATION CENTER · DEMO</p><h2>飞书研发协同</h2><p>演示模块：展示未来如何连接飞书文档、群通知和审批流。</p></div><button className="settings-close" onClick={() => setFeishuDemoOpen(false)}>×</button></div><div className="feishu-status"><span className="demo-badge">演示模式</span><strong>未连接真实飞书应用</strong><small>当前配置只保存在浏览器本地，不会发送到任何服务。</small></div><div className="feishu-capability-grid"><div>✓ 飞书文档同步<small>研发文件进入当前项目资源库</small></div><div>✓ Agent 任务通知<small>Plan、失败和完成结果提醒</small></div><div>✓ 审批提醒<small>论文审核与材料定稿提醒负责人</small></div><div>✓ 组织权限映射<small>按飞书成员同步项目访问范围</small></div></div><div className="settings-form feishu-form"><label>App ID<input value={feishuConfig.appId} onChange={(event) => setFeishuConfig((config) => ({ ...config, appId: event.target.value }))} placeholder="cli_xxxxxxxxx" /></label><label>App Secret<input type="password" value={feishuConfig.appSecret} onChange={(event) => setFeishuConfig((config) => ({ ...config, appSecret: event.target.value }))} placeholder="演示占位，不会提交" /></label><label>租户 / 团队<input value={feishuConfig.tenant} onChange={(event) => setFeishuConfig((config) => ({ ...config, tenant: event.target.value }))} placeholder="研发中心" /></label><label>默认同步空间<input value={feishuConfig.space} onChange={(event) => setFeishuConfig((config) => ({ ...config, space: event.target.value }))} /></label></div><div className="feishu-switches"><label><input type="checkbox" checked={feishuConfig.syncFiles} onChange={(event) => setFeishuConfig((config) => ({ ...config, syncFiles: event.target.checked }))} />同步研发文件</label><label><input type="checkbox" checked={feishuConfig.notify} onChange={(event) => setFeishuConfig((config) => ({ ...config, notify: event.target.checked }))} />发送任务通知</label><label><input type="checkbox" checked={feishuConfig.approval} onChange={(event) => setFeishuConfig((config) => ({ ...config, approval: event.target.checked }))} />发送审批提醒</label></div><div className="feishu-flow"><span>飞书研发群</span><i>→</i><span>上传文件</span><i>→</i><span>Agent Plan</span><i>→</i><span>负责人确认</span><i>→</i><span>材料审批</span></div><div className="settings-actions"><button className="ghost" onClick={() => setFeishuDemoOpen(false)}>关闭</button><button className="primary" onClick={() => { setFeishuDemoOpen(false); notify("已保存飞书演示配置；真实接入需配置飞书应用凭据"); }}>保存演示配置</button></div></section></div> : null}
+      {planDraft ? <PlanEditorModal plan={planDraft} onChange={setPlanDraft} onSave={savePlanEditor} onClose={() => setPlanDraft(null)} /> : null}
+      {skillLibraryOpen ? <SkillLibraryModal skills={skills} onClose={() => setSkillLibraryOpen(false)} onToggle={(id) => setSkills((items) => items.map((item) => item.id === id ? { ...item, enabled: !item.enabled } : item))} onEdit={openSkillEditor} onDelete={(id) => setSkills((items) => items.filter((item) => item.id !== id))} onUpload={(file) => void importSkillFile(file)} onCreate={() => openSkillEditor()} /> : null}
+      {skillEditor ? <SkillEditorModal skill={skillEditor} onChange={setSkillEditor} onClose={() => setSkillEditor(null)} onSave={() => saveSkill(skillEditor)} /> : null}
       {message ? <div className="toast">{message}</div> : null}
     </div>
   );
@@ -837,4 +923,18 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
 function ReasoningTrace({ steps, compact = false }: { steps: TraceStep[]; compact?: boolean }) {
   if (!steps.length) return <p className="trace-empty">执行任务后，这里会显示 Agent 的分析依据和决策步骤。</p>;
   return <div className={`reasoning-trace${compact ? " compact" : ""}`}>{steps.map((step, index) => <div className={`trace-step ${step.status}`} key={`${step.label}-${index}`}><i>{step.status === "done" ? "✓" : step.status === "error" ? "!" : step.status === "active" ? "·" : index + 1}</i><div><strong>{step.label}</strong><small>{step.detail}</small></div></div>)}</div>;
+}
+
+function PlanEditorModal({ plan, onChange, onSave, onClose }: { plan: WorkflowPlan; onChange: (plan: WorkflowPlan) => void; onSave: () => void; onClose: () => void }) {
+  const updateList = (key: "searchQueries" | "screeningCriteria" | "analysisSummary" | "steps", value: string) => onChange({ ...plan, [key]: value.split("\n") } as WorkflowPlan);
+  const updateEvidence = (index: number, key: "evidence" | "researchDirection" | "ipValue", value: string) => onChange({ ...plan, evidenceMap: plan.evidenceMap.map((item, itemIndex) => itemIndex === index ? { ...item, [key]: value } : item) });
+  return <div className="modal-backdrop" onClick={onClose}><section className="plan-editor-modal" onClick={(event) => event.stopPropagation()}><div className="settings-head"><div><p className="eyebrow">WORKFLOW PLAN EDITOR</p><h2>编辑执行计划</h2><p>修改后会作为下一次论文检索、审核和成果转化的执行依据。</p></div><button className="settings-close" onClick={onClose}>×</button></div><div className="plan-editor-content"><label>任务目标<input value={plan.summary} onChange={(event) => onChange({ ...plan, summary: event.target.value })} /></label><label>检索主题 <small>每行一个主题</small><textarea rows={4} value={plan.searchQueries.join("\n")} onChange={(event) => updateList("searchQueries", event.target.value)} /></label><label>论文筛选标准 <small>每行一条标准</small><textarea rows={4} value={plan.screeningCriteria.join("\n")} onChange={(event) => updateList("screeningCriteria", event.target.value)} /></label><label>分析依据 <small>每行一个判断依据</small><textarea rows={4} value={plan.analysisSummary.join("\n")} onChange={(event) => updateList("analysisSummary", event.target.value)} /></label><label>执行步骤 <small>每行一个步骤</small><textarea rows={5} value={plan.steps.join("\n")} onChange={(event) => updateList("steps", event.target.value)} /></label><div className="plan-evidence-editor"><div className="editor-label"><strong>证据映射</strong><button className="ghost" onClick={() => onChange({ ...plan, evidenceMap: [...plan.evidenceMap, { evidence: "", researchDirection: "", ipValue: "" }] })}>＋新增映射</button></div>{plan.evidenceMap.map((item, index) => <div className="evidence-edit-row" key={`${index}-${item.evidence}`}><input value={item.evidence} onChange={(event) => updateEvidence(index, "evidence", event.target.value)} placeholder="研发文件证据" /><input value={item.researchDirection} onChange={(event) => updateEvidence(index, "researchDirection", event.target.value)} placeholder="对应论文方向" /><input value={item.ipValue} onChange={(event) => updateEvidence(index, "ipValue", event.target.value)} placeholder="知识产权价值" /><button className="ghost danger" onClick={() => onChange({ ...plan, evidenceMap: plan.evidenceMap.filter((_, itemIndex) => itemIndex !== index) })}>删除</button></div>)}</div></div><div className="settings-actions"><button className="ghost" onClick={onClose}>取消</button><button className="primary" onClick={onSave}>保存并返回计划</button></div></section></div>;
+}
+
+function SkillLibraryModal({ skills, onClose, onToggle, onEdit, onDelete, onUpload, onCreate }: { skills: SkillDocument[]; onClose: () => void; onToggle: (id: string) => void; onEdit: (skill?: SkillDocument) => void; onDelete: (id: string) => void; onUpload: (file?: File) => void; onCreate: () => void }) {
+  return <div className="modal-backdrop" onClick={onClose}><section className="skill-library-modal" onClick={(event) => event.stopPropagation()}><div className="settings-head"><div><p className="eyebrow">SKILL DOCUMENTS</p><h2>Skill 能力库</h2><p>每个 Skill 都是一份可编辑 Markdown 文档，启用后会真实注入 Agent 请求。</p></div><button className="settings-close" onClick={onClose}>×</button></div><div className="skill-library-toolbar"><label className="skill-upload-button">↑ 上传 Markdown<input hidden type="file" accept=".md,.markdown,.txt" onChange={(event) => { void onUpload(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button className="primary" onClick={onCreate}>＋ 新建 Skill</button></div><div className="skill-library-list">{skills.map((skill) => <article className={`skill-doc-card${skill.enabled ? " enabled" : ""}`} key={skill.id}><div className="skill-doc-head"><div><strong>{skill.name}</strong><small>{skill.source === "uploaded" ? "用户上传" : "内置文档"} · 更新于 {formatDate(skill.updatedAt)}</small></div><label className="skill-toggle"><input type="checkbox" checked={skill.enabled} onChange={() => onToggle(skill.id)} /><span>{skill.enabled ? "已启用" : "已停用"}</span></label></div><p>{skill.description || "暂无说明"}</p><pre>{skill.content.slice(0, 520)}{skill.content.length > 520 ? "\n…" : ""}</pre><div className="skill-doc-actions"><button className="ghost" onClick={() => onEdit(skill)}>编辑 Markdown</button>{skill.source === "uploaded" ? <button className="ghost danger" onClick={() => onDelete(skill.id)}>删除</button> : null}</div></article>)}</div></section></div>;
+}
+
+function SkillEditorModal({ skill, onChange, onClose, onSave }: { skill: SkillDocument; onChange: (skill: SkillDocument) => void; onClose: () => void; onSave: () => void }) {
+  return <div className="modal-backdrop" onClick={onClose}><section className="skill-editor-modal" onClick={(event) => event.stopPropagation()}><div className="settings-head"><div><p className="eyebrow">EDIT MARKDOWN SKILL</p><h2>编辑 Skill</h2><p>修改保存后，后续 Agent 请求会使用最新文档。</p></div><button className="settings-close" onClick={onClose}>×</button></div><div className="skill-editor-content"><label>Skill 名称<input value={skill.name} onChange={(event) => onChange({ ...skill, name: event.target.value })} /></label><label>用途说明<input value={skill.description} onChange={(event) => onChange({ ...skill, description: event.target.value })} /></label><label>Markdown 内容<textarea className="skill-markdown-editor" rows={18} value={skill.content} onChange={(event) => onChange({ ...skill, content: event.target.value })} /></label><label className="remember-key"><input type="checkbox" checked={skill.enabled} onChange={(event) => onChange({ ...skill, enabled: event.target.checked })} />保存后启用此 Skill</label></div><div className="settings-actions"><button className="ghost" onClick={onClose}>取消</button><button className="primary" onClick={onSave}>保存 Skill</button></div></section></div>;
 }

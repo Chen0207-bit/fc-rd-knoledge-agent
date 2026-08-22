@@ -257,10 +257,13 @@ async function collectSources(env: Env, refs: string[], currentProjectId = 1) {
   return sections.join("\n\n").slice(0, 48_000);
 }
 
-async function generateAssistantReply(env: Env, messages: Array<{ role: "user" | "assistant"; content: string }>, context: string, customConfig: UserAIConfig | null = null) {
+async function generateAssistantReply(env: Env, messages: Array<{ role: "user" | "assistant"; content: string }>, context: string, customConfig: UserAIConfig | null = null, skillContext = "") {
   const system = `你是“研知 Agent”的研发知识顾问，陪伴用户完成“研究方向讨论—论文检索—人工审核—知识入库—知识产权转化”全流程。
 回答要简洁、具体、可执行：优先给出检索关键词、筛选标准、下一步操作和风险提示。不要编造论文、实验数据或法律结论；需要更多信息时直接提问。不要输出隐式思维链，只输出结论、依据摘要和建议。
-当前页面上下文：${context.slice(0, 12000)}`;
+当前页面上下文：${context.slice(0, 12000)}
+当前启用的 Skill 文档：
+${skillContext.slice(0, 24000) || "暂无自定义 Skill 文档，请使用通用能力。"}
+调用要求：优先遵守 Skill 文档中的输入、输出和检查规则；回答中说明本次实际采用了哪些 Skill 和依据摘要。`;
   const payloadMessages = [{ role: "system", content: system }, ...messages.slice(-12).map((item) => ({ role: item.role, content: item.content.slice(0, 4000) }))];
   const apiKey = customConfig?.apiKey || env.GLM_API_KEY;
   if (apiKey) {
@@ -308,16 +311,16 @@ const worker = {
       }
       const currentProjectId = projectId(url);
       if (request.method === "POST" && url.pathname === "/api/assistant-chat") {
-        const body = await request.json() as { messages?: Array<{ role?: string; content?: string }>; context?: string };
+        const body = await request.json() as { messages?: Array<{ role?: string; content?: string }>; context?: string; skillContext?: string };
         const messages = (body.messages || []).filter((item): item is { role: "user" | "assistant"; content: string } =>
           (item.role === "user" || item.role === "assistant") && Boolean(item.content?.trim()),
         );
         if (!messages.length) return error(request, env, "请输入想讨论的内容");
-        const reply = await generateAssistantReply(env, messages, body.context || "暂无页面上下文", userAIConfig(request));
+        const reply = await generateAssistantReply(env, messages, body.context || "暂无页面上下文", userAIConfig(request), String(body.skillContext || ""));
         return json(request, env, { reply: reply.content, model: reply.model });
       }
       if (request.method === "POST" && url.pathname === "/api/assistant-plan") {
-        const body = await request.json() as { sourceText?: string; fileName?: string; projectDescription?: string };
+        const body = await request.json() as { sourceText?: string; fileName?: string; projectDescription?: string; skillContext?: string };
         const sourceText = String(body.sourceText || "").slice(0, 48_000);
         if (sourceText.length < 80) return error(request, env, "研发文件内容不足，无法制定计划");
         const planPrompt = `请为研发文件设计一个可执行的研发知识闭环计划。只输出 JSON，不要 Markdown 代码块，不要输出隐式思维链。
@@ -328,7 +331,7 @@ JSON 字段必须为：
 文件名：${String(body.fileName || "研发文件")}
 研发文件内容：
 ${sourceText}`;
-        const reply = await generateAssistantReply(env, [{ role: "user", content: planPrompt }], "这是一个待用户确认的研发文件 Workflow Plan 生成请求。", userAIConfig(request));
+        const reply = await generateAssistantReply(env, [{ role: "user", content: planPrompt }], "这是一个待用户确认的研发文件 Workflow Plan 生成请求。", userAIConfig(request), String(body.skillContext || ""));
         let plan: { summary: string; searchQueries: string[]; screeningCriteria: string[]; evidenceMap: Array<{ evidence: string; researchDirection: string; ipValue: string }>; analysisSummary: string[]; steps: string[] };
         try {
           const normalized = reply.content.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
@@ -446,7 +449,7 @@ ${sourceText}`;
 
       if (request.method === "POST" && url.pathname === "/api/ip-drafts") {
         if (!await enforceGenerationLimit(request, env)) return error(request, env, "本小时生成次数已达上限，请稍后再试", 429);
-        const body = await request.json() as { title?: string; sources?: string[]; groupName?: string; model?: string; speed?: string };
+        const body = await request.json() as { title?: string; sources?: string[]; groupName?: string; model?: string; speed?: string; skillContext?: string };
         const title = (body.title || "研发成果知识产权材料").slice(0, 200);
         const groupName = String(body.groupName || "未分类").slice(0, 80);
         const requestedModel = body.model === "glm-5.3" || body.model === "qwen3" ? body.model : "auto";
@@ -474,6 +477,9 @@ ${sourceText}`;
 10. # 待确认事项
 
 要求：不得编造资料中不存在的实验数据、性能指标或法律结论；信息不足处用【待补充】标记；避免宣传语；在结尾声明“本材料为AI生成初稿，需由知识产权专业人员复核”。
+
+启用的 Skill 文档：
+${String(body.skillContext || "").slice(0, 24000)}
 
 研发资料：
 ${sourceText}`;
