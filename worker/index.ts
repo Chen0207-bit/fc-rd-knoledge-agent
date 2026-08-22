@@ -309,6 +309,17 @@ const worker = {
         await env.DB.prepare("UPDATE projects SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(name, String(body.description || "").slice(0, 500), Number(projectMatch[1])).run();
         return json(request, env, { ok: true });
       }
+      if (request.method === "DELETE" && projectMatch) {
+        const id = Number(projectMatch[1]);
+        const count = await env.DB.prepare("SELECT COUNT(*) AS count FROM projects").first<{ count: number }>();
+        if (id === 1) return error(request, env, "默认研发项目不能删除，请先切换到其他项目");
+        if (Number(count?.count || 0) <= 1) return error(request, env, "至少保留一个研发项目");
+        await env.DB.prepare("DELETE FROM papers WHERE project_id = ?").bind(id).run();
+        await env.DB.prepare("DELETE FROM documents WHERE project_id = ?").bind(id).run();
+        await env.DB.prepare("DELETE FROM ip_drafts WHERE project_id = ?").bind(id).run();
+        await env.DB.prepare("DELETE FROM projects WHERE id = ?").bind(id).run();
+        return json(request, env, { ok: true });
+      }
       const currentProjectId = projectId(url);
       if (request.method === "POST" && url.pathname === "/api/assistant-chat") {
         const body = await request.json() as { messages?: Array<{ role?: string; content?: string }>; context?: string; skillContext?: string };
