@@ -53,18 +53,203 @@ function readResumeTask(): ResumeTask | null {
   try { return JSON.parse(sessionStorage.getItem("rd-resume-task") || "null") as ResumeTask | null; } catch { return null; }
 }
 
+const SKILL_LIBRARY_VERSION = 2;
 const DEFAULT_SKILLS: SkillDocument[] = [
-  { id: "research-dialogue", name: "研发任务对话 Skill", description: "把自然语言需求转成可执行的研发任务和下一步建议。", content: "# 研发任务对话 Skill\n\n## 目标\n围绕当前项目理解研发人员的问题，给出可执行的检索、审核和转化建议。\n\n## 规则\n- 优先追问缺失的技术对象、场景、约束和评价指标。\n- 输出检索关键词、筛选标准和下一步动作。\n- 不编造论文、实验数据或法律结论。\n", enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
-  { id: "document-parser", name: "研发文件解析 Skill", description: "提取研发文件中的技术对象、方法、工程约束和评价指标。", content: "# 研发文件解析 Skill\n\n## 输入\nPDF 或 DOCX 的文本内容。\n\n## 输出\n技术对象、待解决问题、核心方法、工程约束、评价指标和待补充信息。\n\n## 检查\n保留原文证据，不把推测当成事实。\n", enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
-  { id: "paper-search", name: "论文检索 Skill", description: "根据研发证据拆分互补主题，检索并合并多来源论文。", content: "# 论文检索 Skill\n\n## 检索策略\n至少覆盖方法、应用场景、工程约束和评价指标四类关键词。\n\n## 来源\narXiv、Semantic Scholar、Crossref。\n\n## 输出\n论文标题、来源、摘要、年份、原文链接和去重后的候选集。\n", enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
-  { id: "paper-review", name: "论文相关性审核 Skill", description: "根据技术相关性、证据质量和知识产权价值给出审核建议。", content: "# 论文相关性审核 Skill\n\n## 判断维度\n- 是否解决相近技术问题\n- 技术方案是否可比\n- 是否存在可核验摘要或全文\n- 对背景技术、差异点和创新点是否有价值\n\n## 输出\n建议纳入、建议排除或需要人工确认，并给出依据摘要。\n", enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
-  { id: "ip-drafting", name: "知识产权生成 Skill", description: "将研发文件、论文证据和创新点组织为可审核的技术交底书初稿。", content: "# 知识产权生成 Skill\n\n## 结构\n技术领域、背景技术、现有技术问题、技术方案、有益效果、附图说明、实施方式、摘要和权利要求建议。\n\n## 约束\n每个关键结论都要能回指研发文件或论文证据；缺失信息标记为待确认。\n", enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
+  { id: "research-dialogue", name: "研发任务对话 Skill", description: "把自然语言研发诉求转成可确认、可恢复、可追溯的任务计划。", content: `---
+name: research-dialogue
+description: 将研发人员的自然语言需求转为可执行的检索、审核和知识产权任务。
+triggers: 研发需求、技术调研、帮我找论文、从文件开始、生成专利材料
+outputs: 任务摘要、关键追问、检索计划、审核门槛、待确认事项
+---
+# 研发任务对话 Skill
+
+## 目标与边界
+把对话变成结构化研发任务，不替用户作未经确认的技术事实、实验结论或法律判断。所有后续步骤必须能回到项目、文件、论文和人工确认记录。
+
+## 何时启用
+- 用户描述了一个研发问题、方案、技术路线或希望从文件开始工作。
+- 用户要求扩大论文范围、比较方案、提取创新点或生成知识产权材料。
+
+## 执行流程
+1. 识别技术对象、应用场景、目标指标、已知约束、时间范围和期望产物。
+2. 缺少关键信息时一次只问最影响结果的 1—3 个问题，并解释为什么需要。
+3. 生成可编辑 Plan：输入、步骤、检索主题、筛选规则、输出格式、风险和人工确认点。
+4. 用户确认后再调用文件解析、论文检索、审核和生成 Skill；每一步报告输入、依据、产物和下一步。
+
+## 输出契约
+必须包含：任务摘要；已知事实/待确认假设；建议的检索主题；预计产物；风险提示；需要用户确认的选项。Plan 步骤使用可勾选状态，支持暂停、继续、重跑和修改。
+
+## 质量门
+不得把推测写成事实；不得声称已访问未访问的数据库；检索范围、结果数量和失败原因必须透明；涉及专利新颖性或侵权时明确提示需专业人员复核。
+`, enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
+  { id: "document-parser", name: "研发文件解析 Skill", description: "按证据层级解析 PDF/DOCX，提取技术对象、方案、指标、缺口和可检索线索。", content: `---
+name: document-parser
+description: 从研发文件提取可引用的技术事实，并建立章节、页码、原文片段与技术要素的映射。
+triggers: 上传研发文件、解析 PDF、阅读方案书、提取技术方案
+outputs: 文档摘要、技术要素表、证据片段、检索词、信息缺口
+---
+# 研发文件解析 Skill
+
+## 输入
+PDF/DOCX 文本、文件名、项目上下文。优先保留章节标题、页码、表格标题和原文片段；扫描件或图片文字识别不完整时必须标记。
+
+## 解析方法
+1. 先给出文档类型、版本、时间和可读性检查。
+2. 按“问题—对象—输入—处理—输出—指标—约束—效果”拆分技术方案。
+3. 将内容分为：原文事实、作者主张、Agent 推断、待补充信息四类。
+4. 提取同义词、缩写、上下位概念、工程约束和指标范围，生成后续论文检索词。
+
+## 证据契约
+每个关键技术要素都要带章节/页码/原文摘录；无法定位时写“定位缺失”。不要补写文件没有的参数、实验数据、发明人或因果关系。
+
+## 输出
+输出结构化摘要、技术要素表、可检索关键词组、证据清单、冲突点和待向研发人员确认的问题。摘要之后必须附“解析局限”。
+
+## 失败处理
+文本为空、乱码、页数超限或表格丢失时停止下游自动转化，只给出可恢复的解析结果并请求重新上传或人工补录。
+`, enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
+  { id: "paper-search", name: "论文检索 Skill", description: "以主题分解、多来源检索、去重和筛选器形成可复核的论文候选集。", content: `---
+name: paper-search
+description: 根据研发文件证据设计多组互补查询，在可用学术来源中检索、去重并排序论文。
+triggers: 搜索论文、扩大检索、找现有技术、补充学术依据
+outputs: 查询矩阵、候选论文、来源状态、筛选统计、检索缺口
+---
+# 论文检索 Skill
+
+## 检索原则
+先把技术拆成方法、对象/场景、工程约束、评价指标、替代方案五类概念，再生成同义词、英文词、缩写和组合查询。不要只用一条宽泛查询。
+
+## 检索矩阵
+至少覆盖：核心方法；应用场景；关键部件/数据；性能指标；工程部署；相邻领域替代方案。每组查询记录关键词、来源、时间范围、命中数和是否受限。
+
+## 来源与筛选
+优先使用可访问的 arXiv、Semantic Scholar、Crossref 等来源；保留 DOI、作者、年份、摘要、URL、PDF 可用性和来源。来源不可访问时不能伪造结果，需显示“未核验”。支持年份、作者、来源、全文、相关度和排序筛选。
+
+## 排序与去重
+综合标题/摘要技术匹配、与研发文件的证据关联、年份、引用或影响指标、全文可用性和来源可信度排序。用 DOI、规范化标题和作者年份去重；相似论文合并时保留各自来源。
+
+## 输出契约
+输出查询矩阵、候选清单、每篇的匹配理由、证据状态和排除原因，并报告“检索覆盖了什么、没有覆盖什么”。不得把搜索摘要当作全文结论。
+
+## 人工确认
+论文是否入库、是否作为现有技术、是否支持某个创新点必须由用户确认；Agent 只给建议，不给新颖性或侵权的确定结论。
+`, enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
+  { id: "paper-review", name: "论文相关性审核 Skill", description: "逐篇给出可解释的纳入/排除建议，并把论文证据关联到研发文件和创新点。", content: `---
+name: paper-review
+description: 对论文进行技术相关性、证据质量、时效性和知识产权价值的分层审核。
+triggers: 审核论文、批量审核、判断相关性、论文入库
+outputs: 审核结论、评分维度、证据摘要、关联技术点、人工待办
+---
+# 论文相关性审核 Skill
+
+## 审核维度
+1. 问题相似度：是否解决同类技术问题。
+2. 方案相似度：关键步骤、结构或系统组件是否可比。
+3. 证据质量：摘要、全文、DOI、作者和来源是否可核验。
+4. 工程相关性：是否涉及相同约束、指标、数据或部署环境。
+5. 研发/IP 价值：能否支持背景技术、对比方案、差异点或创新点分析。
+
+## 结论规则
+“建议纳入”必须列出至少两条证据和对应研发文件技术点；“建议排除”必须写清排除理由；证据不足、技术边界不清或来源冲突时只能给“需要人工确认”。
+
+## 输出格式
+结论 + 维度评分/等级 + 证据摘要 + 对应文件章节 + 对创新点的价值 + 风险与缺口 + 建议动作。禁止只输出一个总分，禁止把关键词命中当作技术等同。
+
+## 批量质量控制
+批量审核前先展示评分标准；审核后报告纳入/排除/待确认数量、重复项、缺全文项和低置信度项。入库时保存审核人、时间、版本和备注。
+
+## 人工门
+论文入库、作为现有技术引用、用于形成权利要求依据，均保留人工确认记录；Agent 不替代专利代理师或法律意见。
+`, enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
+  { id: "paper-deep-read", name: "论文深度阅读与证据核验 Skill", description: "把已选论文拆成方法、实验、限制和可引用证据，避免用摘要过度推断。", content: `---
+name: paper-deep-read
+description: 对重点论文进行结构化精读、证据定位和结论边界核验。
+triggers: 深度阅读、精读论文、核验实验、提取论文证据
+outputs: 论文卡片、方法流程、实验表、局限性、可引用证据、与研发方案的差异
+---
+# 论文深度阅读与证据核验 Skill
+
+## 阅读顺序
+先确认元数据和全文可用性，再按摘要/问题、方法、数据、实验、结果、限制、结论阅读。区分作者报告的结果、作者解释、Agent 推断和无法验证的内容。
+
+## 必提字段
+研究问题；技术方案步骤；关键参数；数据集/样本；基线；评价指标；实验结果；消融或对比；限制与适用边界；与当前研发文件的相同点、差异点和不可比点。
+
+## 证据规则
+关键数字必须带页码/章节/表格定位；只看到摘要时标记“摘要级证据”；论文没有报告的内容不得补全。若不同章节或来源冲突，保留冲突并交给用户判断。
+
+## 输出
+先给一页可读摘要，再给结构化论文卡片和证据清单，最后给“能支持什么/不能支持什么”。引用建议使用论文原始链接、DOI和定位信息。
+`, enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
+  { id: "ip-drafting", name: "知识产权生成 Skill", description: "把研发事实、论文证据和人工确认的创新点组织成接近生产使用的技术交底书初稿。", content: `---
+name: ip-drafting
+description: 根据研发文件与已审核证据生成可审阅、可追溯、保留缺口的知识产权材料草稿。
+triggers: 生成交底书、提取创新点、准备专利材料、生成知识产权申报材料
+outputs: 技术交底书、创新点表、权利要求建议、证据映射、待补字段
+---
+# 知识产权生成 Skill
+
+## 前置条件
+只有在研发文件已解析、论文已审核且创新点经过用户确认后生成正式草稿；前置证据不足时输出“待补信息清单”，不得假装材料完整。
+
+## 生产级结构
+文档编号/版本/密级；项目和发明人信息；技术领域；背景技术及其证据；要解决的技术问题；完整技术方案；关键步骤/模块；有益效果与验证依据；附图说明；具体实施方式；可替代实施例；创新点与对比表；摘要；权利要求书建议；风险和待代理师确认事项。
+
+## 证据映射
+每个核心技术特征关联研发文件章节和论文/实验依据；区分“研发已实现”“方案设想”“论文支持”“待验证”。不擅自添加参数、效果、发明人、申请人或法律结论。
+
+## 权利要求建议
+围绕必要技术特征组织独立项，围绕可选模块、参数范围、步骤关系和替代实现组织从属项；只提出技术表达建议，不宣称已满足新颖性、创造性或授权条件。
+
+## 交付与审核
+输出 Markdown 可审阅稿、字段缺口、证据链和版本号；默认进入“AI 初稿”，由研发负责人、知识产权负责人和代理机构依次审核。支持逐段修改、评论和重新生成。
+`, enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
+  { id: "ip-quality-gate", name: "知识产权材料质量门 Skill", description: "在材料交付前检查事实、证据、结构、缺口和权利要求表达风险。", content: `---
+name: ip-quality-gate
+description: 对知识产权材料做交付前的完整性、可追溯性和风险检查，不替代专业法律审查。
+triggers: 检查专利材料、材料质检、提交前审核、检查交底书
+outputs: 质量门报告、阻塞项、警告项、证据覆盖率、修改建议
+---
+# 知识产权材料质量门 Skill
+
+## 阻塞项
+缺少项目/发明人/申请人等必填信息；核心技术特征没有研发文件依据；关键效果没有验证或来源；权利要求出现未在说明书展开的特征；引用论文无法定位；将推断写成已实现事实。
+
+## 检查项
+- 文档结构是否齐全、标题和编号是否一致。
+- 技术问题、方案、效果是否形成因果闭环。
+- 创新点是否能映射到具体实施方式和证据。
+- 术语、参数、缩写是否统一，是否存在互相矛盾。
+- 摘要、权利要求和正文是否描述同一技术范围。
+- 是否清楚标记 AI 生成、人工确认和待代理机构修改内容。
+
+## 输出
+按阻塞/高风险/建议三档报告；给出字段、段落或证据定位；统计核心特征覆盖率；生成修订清单和下一位审核角色。没有足够材料时只报告缺口，不编造通过结论。
+
+## 安全边界
+明确声明这不是专利法律意见、授权保证或侵权判断；最终提交前必须由有资质的知识产权人员审核。
+`, enabled: true, source: "built-in", updatedAt: new Date().toISOString() },
 ];
 
 function readSkills() {
   try {
     const saved = JSON.parse(localStorage.getItem("rd-skill-documents") || "null") as SkillDocument[] | null;
-    return saved?.length ? saved : DEFAULT_SKILLS;
+    if (!saved?.length) return DEFAULT_SKILLS;
+    const version = Number(localStorage.getItem("rd-skill-library-version") || 0);
+    if (version < SKILL_LIBRARY_VERSION) {
+      const savedById = new Map(saved.map((skill) => [skill.id, skill]));
+      const migrated = DEFAULT_SKILLS.map((skill) => {
+        const old = savedById.get(skill.id);
+        return old?.source === "uploaded" ? old : { ...skill, enabled: old?.enabled ?? skill.enabled };
+      });
+      const defaultsIds = new Set(DEFAULT_SKILLS.map((skill) => skill.id));
+      const custom = saved.filter((skill) => !defaultsIds.has(skill.id));
+      const result = [...migrated, ...custom];
+      localStorage.setItem("rd-skill-documents", JSON.stringify(result));
+      localStorage.setItem("rd-skill-library-version", String(SKILL_LIBRARY_VERSION));
+      return result;
+    }
+    return saved;
   } catch { return DEFAULT_SKILLS; }
 }
 
@@ -240,7 +425,10 @@ export default function App() {
   useEffect(() => { localStorage.setItem("rd-theme-preference", themePreference); }, [themePreference]);
   useEffect(() => { sessionStorage.setItem("rd-agent-chat", JSON.stringify(chatMessages.slice(-20))); }, [chatMessages]);
   useEffect(() => { localStorage.setItem("rd-draft-stages", JSON.stringify(draftStages)); }, [draftStages]);
-  useEffect(() => { localStorage.setItem("rd-skill-documents", JSON.stringify(skills)); }, [skills]);
+  useEffect(() => {
+    localStorage.setItem("rd-skill-documents", JSON.stringify(skills));
+    localStorage.setItem("rd-skill-library-version", String(SKILL_LIBRARY_VERSION));
+  }, [skills]);
 
   useEffect(() => {
     if (!IS_LOCAL_DEMO) return;
